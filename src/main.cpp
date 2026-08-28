@@ -1,3 +1,4 @@
+#include "waloudb/core/ColumnType.h"
 #include "waloudb/core/Database.h"
 #include "waloudb/core/Table.h"
 #include <iostream>
@@ -12,6 +13,13 @@ int main() {
   db.createTable("users");
   db.createTable("posts");
   db.createTable("cache");
+  db.getTable("cache").createColumn("name", WalouDB::ColumnType::String);
+  // std::cout << db.getTable("cache").getColumn("name").getType()<<
+  std::cout << "\n";
+  std::cout << WalouDB::columnTypeToString(
+                   db.getTable("cache").getColumn("name").getType())
+            << "\n";
+  std::cout << db.getTable("cache").getColumn("name").getName() << "\n";
   db.listTables();
   std::cout << db.getTable("users").getName() << "\n";
   db.dropTable("users");

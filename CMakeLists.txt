@@ -8,11 +8,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_executable(WalouDB
-    src/main.cpp
-    src/core/Database.cpp
-    src/core/Table.cpp
-)
+
+file(GLOB_RECURSE SOURCES "src/*.cpp")
+
+add_executable(WalouDB ${SOURCES})
+
 target_include_directories(WalouDB
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
