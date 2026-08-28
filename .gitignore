@@ -1,0 +1,41 @@
+# Build output
+/build/
+/build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# C/C++ build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Debug / release output
+Debug/
+Release/
+out/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local cache
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
