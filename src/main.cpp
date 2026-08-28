@@ -1,11 +1,26 @@
 #include "waloudb/core/Database.h"
+#include "waloudb/core/Table.h"
 #include <iostream>
 #include <string>
 
 int main() {
 
   std::string input;
+  WalouDB::Database db;
 
+  db.createTable("users");
+  db.createTable("users");
+  db.createTable("posts");
+  db.createTable("cache");
+  db.listTables();
+  std::cout << db.getTable("users").getName() << "\n";
+  db.dropTable("users");
+  db.listTables();
+
+  if (!db.createTable("posts")) {
+    std::cout << "table already exists\n";
+  }
+  db.getTable("users");
   while (true) {
     std::cout << "WalouDB>> ";
     std::getline(std::cin, input);
@@ -13,6 +28,8 @@ int main() {
       std::cout << "Available commands: \nhelp\nexit\n";
     } else if (input == ".exit") {
       break;
+    } else if (input == "create database") {
+
     } else {
       std::cout << "unrecognizable command\n";
     }

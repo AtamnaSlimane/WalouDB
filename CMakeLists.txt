@@ -11,6 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_executable(WalouDB
     src/main.cpp
     src/core/Database.cpp
+    src/core/Table.cpp
 )
 target_include_directories(WalouDB
     PRIVATE
