@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Column.h"
+#include "Row.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -13,12 +14,15 @@ public:
 
   const std::string &getName() const;
   bool createColumn(const std::string &name, const ColumnType &type);
+  bool insertRow(Row rows);
   Column &getColumn(const std::string &name);
   bool hasColumn(const std::string &name) const;
 
 private:
   std::string m_name;
-  std::unordered_map<std::string, std::unique_ptr<Column>> columns;
+  std::vector<Column> m_columns;
+  std::vector<Row> m_rows;
+  std::unordered_map<std::string, size_t> m_columnIndices;
 };
 
 } // namespace WalouDB

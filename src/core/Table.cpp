@@ -6,22 +6,51 @@
 namespace WalouDB {
 const std::string &Table::getName() const { return this->m_name; }
 bool Table::createColumn(const std::string &name, const ColumnType &type) {
-  if (columns.contains(name)) {
-    std::cout << "column " << name << "already exists";
+  if (hasColumn(name)) {
     return false;
-  } else {
-    columns[name] = std::make_unique<Column>(name, type);
-    return true;
   }
+
+  size_t index = m_columns.size();
+
+  m_columns.emplace_back(name, type);
+
+  m_columnIndices[name] = index;
+
+  return true;
 }
+
 Column &Table::getColumn(const std::string &name) {
-  if (!this->hasColumn(name)) {
+  auto it = m_columnIndices.find(name);
+
+  if (it == m_columnIndices.end()) {
     throw std::runtime_error("column " + name + " not found");
   }
 
-  return *columns.at(name);
+  return m_columns[it->second];
 }
+
 bool Table::hasColumn(const std::string &name) const {
-  return columns.contains(name);
+  return m_columnIndices.contains(name);
 }
+
+bool Table::insertRow(Row row) {
+
+  // Check number of values
+  if (row.size() != m_columns.size()) {
+    return false;
+  }
+  const auto &values = row.getValues();
+
+  for (size_t i = 0; i < m_columns.size(); ++i) {
+    if (!valueMatchesColumnType(values[i], m_columns[i].getType())) {
+      return false;
+    }
+  }
+
+  // Everything is valid
+  m_rows.push_back(std::move(row));
+
+  return true;
+}
+
 } // namespace WalouDB
