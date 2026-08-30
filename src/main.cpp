@@ -137,5 +137,16 @@ int main() {
   std::cout << "rows all \n";
   users.printRows(users.getAllRows());
 
+  users.deleteRowByIndex(1);
+
+  std::cout << "rows all after deletion\n";
+  users.printRows(users.getAllRows());
+
+  std::cout << "\n";
+  users.printColumns();
+  std::cout << "\n";
+
+  users.printColumnIndices();
+
   return 0;
 }

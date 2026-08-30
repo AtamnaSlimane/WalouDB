@@ -66,4 +66,33 @@ void Table::printRows(const std::vector<Row> &rows) {
   }
 }
 
+bool Table::deleteRowByIndex(size_t index) {
+  if (m_rows.size() <= index) {
+    return false;
+  } else {
+    m_rows.erase(m_rows.begin() + index);
+    return true;
+  }
+};
+
+bool Table::deleteRowByValue(std::string column_name, Value value) {
+
+  if (!hasColumn(column_name)) {
+    return false;
+  } else {
+    return true;
+  }
+};
+void Table::printColumns() const {
+  for (const auto &column : m_columns) {
+    std::cout << column.getName() << "\n";
+  }
+}
+void Table::printColumnIndices() const {
+  std::cout << "--- Column Indices ---\n";
+  for (const auto &[column_name, index] : m_columnIndices) {
+    std::cout << column_name << " -> " << index << "\n";
+  }
+}
+
 } // namespace WalouDB
