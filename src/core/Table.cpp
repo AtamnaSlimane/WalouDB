@@ -2,6 +2,7 @@
 #include "waloudb/core/ColumnType.h"
 #include <iostream>
 #include <memory>
+#include <vector>
 
 namespace WalouDB {
 const std::string &Table::getName() const { return this->m_name; }
@@ -51,6 +52,18 @@ bool Table::insertRow(Row row) {
   m_rows.push_back(std::move(row));
 
   return true;
+}
+void Table::printRow(const Row &row) {
+  for (const auto &value : row.getValues()) {
+    std::visit([](const auto &v) { std::cout << v << " "; }, value);
+  }
+
+  std::cout << '\n';
+}
+void Table::printRows(const std::vector<Row> &rows) {
+  for (const auto &row : rows) {
+    printRow(row);
+  }
 }
 
 } // namespace WalouDB

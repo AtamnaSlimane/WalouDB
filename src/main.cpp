@@ -131,5 +131,11 @@ int main() {
   std::cout << "\nTables:\n";
   db.listTables();
 
+  std::cout << "row get with index\n";
+  users.printRow(users.getRow(1));
+
+  std::cout << "rows all \n";
+  users.printRows(users.getAllRows());
+
   return 0;
 }
