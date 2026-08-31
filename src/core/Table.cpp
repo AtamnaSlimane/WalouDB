@@ -75,14 +75,9 @@ bool Table::deleteRowByIndex(size_t index) {
   }
 };
 
-bool Table::deleteRowByValue(std::string column_name, Value value) {
-
-  if (!hasColumn(column_name)) {
-    return false;
-  } else {
-    return true;
-  }
-};
+// std::vector<Row> &Table::getRowByValue(std::string column_name, Value
+// value)const {
+// };
 void Table::printColumns() const {
   for (const auto &column : m_columns) {
     std::cout << column.getName() << "\n";

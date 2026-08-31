@@ -8,6 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ========================
+# Main executable
+# ========================
 
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
@@ -16,8 +19,34 @@ add_executable(WalouDB ${SOURCES})
 target_include_directories(WalouDB
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_include_directories(WalouDB PRIVATE src)
+
+# ========================
+# Dependencies
+# ========================
 
 add_subdirectory(vendor)
-target_link_libraries(WalouDB PRIVATE spdlog::spdlog)
+
+target_link_libraries(
+    WalouDB
+    PRIVATE
+        spdlog::spdlog
+)
+
+# ========================
+# Tests
+# ========================
+
+add_executable(
+    DiskManagerTest
+    tests/DiskManagerTest.cpp
+    src/storage/DiskManager.cpp
+)
+
+target_include_directories(
+    DiskManagerTest
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
