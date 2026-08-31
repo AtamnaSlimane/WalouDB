@@ -18,3 +18,6 @@ target_include_directories(WalouDB
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_include_directories(WalouDB PRIVATE src)
+
+add_subdirectory(vendor)
+target_link_libraries(WalouDB PRIVATE spdlog::spdlog)

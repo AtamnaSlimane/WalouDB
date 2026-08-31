@@ -24,6 +24,7 @@ public:
                                         Value value) const;
 
   const std::vector<Row> &getAllRows() const { return this->m_rows; };
+  const std::vector<Column> &getAllColumns() const { return this->m_columns; };
 
   bool deleteRowByIndex(size_t index);
   bool deleteRowByValue(std::string column_name, Value value);
