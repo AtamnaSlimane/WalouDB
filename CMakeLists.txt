@@ -42,6 +42,7 @@ add_executable(
     DiskManagerTest
     tests/DiskManagerTest.cpp
     src/storage/DiskManager.cpp
+    src/core/Log.cpp
 )
 
 target_include_directories(
@@ -49,4 +50,9 @@ target_include_directories(
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(
+    DiskManagerTest
+    PRIVATE
+        spdlog::spdlog
 )

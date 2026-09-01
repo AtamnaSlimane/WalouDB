@@ -1,3 +1,5 @@
+#pragma once
+
 #include "waloudb/common/Types.h"
 #include <atomic>
 #include <fstream>
