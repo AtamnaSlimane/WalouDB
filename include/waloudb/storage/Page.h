@@ -5,9 +5,8 @@ namespace WalouDB {
 
 class Page {
 public:
-  Page() = default;
-  ~Page() = default;
   char *getData() { return m_data; };
+  const char *getData() const { return m_data; };
   page_id_t getPageId() const { return m_page_id; }
   bool isDirty() const { return m_dirty; }
   int getPinCount() const { return m_pin_count; }

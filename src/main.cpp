@@ -1,246 +1,794 @@
-#include "waloudb/common/Types.h"
-#include "waloudb/core/Log.h"
 #include "waloudb/storage/DiskManager.h"
 #include "waloudb/storage/Page.h"
+#include "waloudb/storage/SlottedPage.h"
+#include "waloudb/storage/Tuple.h"
 
-#include <cstddef>
-#include <cstring>
-#include <filesystem>
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
+#include <vector>
 
-int main() {
-  WalouDB::Log::Init();
+using namespace WalouDB;
 
-  constexpr const char *DB_FILE = "test.db";
+// ============================================================
+// Schema
+// ============================================================
 
-  WALOU_INFO("========================================");
-  WALOU_INFO("       WalouDB DiskManager Test");
-  WALOU_INFO("========================================");
+Schema createSchema() {
+  return Schema({
+      {"id", TypeId::INTEGER},
+      {"name", TypeId::VARCHAR},
+  });
+}
 
-  // --------------------------------------------------
-  // Test configuration
-  // --------------------------------------------------
+// ============================================================
+// Input helpers
+// ============================================================
 
-  std::filesystem::remove(DB_FILE);
+void clearInput() {
+  std::cin.clear();
+  std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+}
 
-  WALOU_INFO("Database file : {}", DB_FILE);
-  WALOU_INFO("Page size     : {} bytes", WalouDB::PAGE_SIZE);
+int readInt(const std::string &prompt) {
+  int value;
 
-  // ==================================================
-  // PHASE 1: Create database and write a page
-  // ==================================================
+  while (true) {
+    std::cout << prompt;
 
-  WalouDB::page_id_t page_id;
-
-  {
-    WALOU_INFO("----------------------------------------");
-    WALOU_INFO("PHASE 1: Create and write");
-    WALOU_INFO("----------------------------------------");
-
-    WalouDB::DiskManager disk_manager(DB_FILE);
-
-    WALOU_INFO("DiskManager created");
-
-    // Allocate a new page.
-    page_id = disk_manager.allocatePage();
-
-    WALOU_INFO("Allocated page ID: {}", page_id);
-
-    // Create an in-memory page.
-    WalouDB::Page page;
-    page.setPageId(page_id);
-
-    WALOU_INFO("Page object created");
-    WALOU_INFO("Page ID: {}", page.getPageId());
-
-    // Fill the page with deterministic data.
-    char *data = page.getData();
-
-    const char *message =
-        "Hello from WalouDB! "
-        "This data was written to disk and should survive reopening.";
-
-    std::memcpy(data, message, std::strlen(message) + 1);
-
-    // Fill the remaining bytes with a predictable pattern.
-    for (std::size_t i = std::strlen(message) + 1; i < WalouDB::PAGE_SIZE;
-         ++i) {
-      data[i] = static_cast<char>(i % 256);
+    if (std::cin >> value) {
+      clearInput();
+      return value;
     }
 
-    WALOU_INFO("Page filled with test data");
+    std::cout << "\nInvalid number. Please try again.\n\n";
+    clearInput();
+  }
+}
 
-    std::cout << "\nData before writing:\n";
-    std::cout << "----------------------------------------\n";
-    std::cout << page.getData() << '\n';
-    std::cout << "----------------------------------------\n";
+std::string readString(const std::string &prompt) {
+  std::string value;
 
-    WALOU_INFO("Writing page {} to disk", page_id);
+  std::cout << prompt;
+  std::getline(std::cin, value);
 
-    disk_manager.writePage(page_id, page.getData());
+  return value;
+}
 
-    WALOU_INFO("Page written successfully");
+// ============================================================
+// ASCII helpers
+// ============================================================
 
-    // Show file size.
-    if (std::filesystem::exists(DB_FILE)) {
-      const auto file_size = std::filesystem::file_size(DB_FILE);
+constexpr int VISUAL_WIDTH = 70;
 
-      WALOU_INFO("Database file size: {} bytes", file_size);
-      WALOU_INFO("Expected minimum size: {} bytes",
-                 (static_cast<std::uintmax_t>(page_id) + 1) *
-                     WalouDB::PAGE_SIZE);
-    }
-
-    WALOU_INFO("Closing DiskManager...");
+void printLine(char c = '=') {
+  for (int i = 0; i < VISUAL_WIDTH; ++i) {
+    std::cout << c;
   }
 
-  // At this point the DiskManager destructor has run.
-  // The file should be closed.
+  std::cout << "\n";
+}
 
-  WALOU_INFO("DiskManager closed");
-  WALOU_INFO("Database file remains on disk");
+void printTitle(const std::string &title) {
+  std::cout << "\n";
+  printLine('=');
+  std::cout << "  " << title << "\n";
+  printLine('=');
+}
 
-  // ==================================================
-  // PHASE 2: Reopen database
-  // ==================================================
+// ============================================================
+// Page visualizer
+// ============================================================
 
-  {
-    WALOU_INFO("----------------------------------------");
-    WALOU_INFO("PHASE 2: Reopen and read");
-    WALOU_INFO("----------------------------------------");
+void printBorder() {
+  std::cout
+      << "+--------------------------------------------------------------+\n";
+}
 
-    WALOU_INFO("Creating a NEW DiskManager");
+void printRow(const std::string &text) {
+  std::cout << "| " << std::left << std::setw(60) << text << " |\n";
+}
 
-    WalouDB::DiskManager disk_manager(DB_FILE);
+void visualizePage(const SlottedPage &page, const Schema &schema) {
 
-    WALOU_INFO("New DiskManager created successfully");
+  const uint16_t lower = page.getLower();
+  const uint16_t upper = page.getUpper();
+  const uint16_t slot_count = page.getSlotCount();
+  const uint16_t free_space = page.freeSpace();
 
-    // Create a fresh Page object.
-    WalouDB::Page recovered_page;
-    recovered_page.setPageId(page_id);
+  // ==========================================================
+  // Title
+  // ==========================================================
 
-    WALOU_INFO("Created empty Page object for page {}",
-               recovered_page.getPageId());
+  std::cout << "\n";
+  std::cout << "====================================================\n\n";
 
-    // Read the page from disk.
-    WALOU_INFO("Reading page {} from disk", page_id);
+  std::cout << "                 WALOUDB PAGE " << page.getId() << "\n\n";
 
-    disk_manager.readPage(page_id, recovered_page.getData());
+  std::cout << "====================================================\n\n\n";
 
-    WALOU_INFO("Page read successfully");
+  // ==========================================================
+  // Beginning of memory
+  // ==========================================================
 
-    // --------------------------------------------------
-    // Print recovered data
-    // --------------------------------------------------
+  std::cout << "MEMORY OFFSET 0\n";
 
-    std::cout << "\nRecovered data:\n";
-    std::cout << "----------------------------------------\n";
-    std::cout << recovered_page.getData() << '\n';
-    std::cout << "----------------------------------------\n";
+  std::cout << "     |\n";
 
-    // --------------------------------------------------
-    // Verify the human-readable message
-    // --------------------------------------------------
+  std::cout << "     v\n\n";
 
-    const char *expected_message =
-        "Hello from WalouDB! "
-        "This data was written to disk and should survive reopening.";
+  // ==========================================================
+  // Page Header
+  // ==========================================================
 
-    if (std::strcmp(recovered_page.getData(), expected_message) == 0) {
+  printBorder();
 
-      WALOU_INFO("Message verification: PASS");
+  printRow("PAGE HEADER");
+
+  printRow("page_id    = " + std::to_string(page.getId()));
+
+  printRow("lower      = " + std::to_string(lower));
+
+  printRow("upper      = " + std::to_string(upper));
+
+  printRow("slot_count = " + std::to_string(slot_count));
+
+  printRow("version    = " + std::to_string(page.getVersion()));
+
+  printBorder();
+
+  // ==========================================================
+  // Slot Directory
+  // ==========================================================
+
+  for (uint16_t i = 0; i < slot_count; ++i) {
+
+    auto slot_opt = page.getSlotInfo(i);
+
+    if (!slot_opt.has_value()) {
+      continue;
+    }
+
+    const Slot slot = *slot_opt;
+
+    printRow("SLOT " + std::to_string(i));
+
+    printRow("offset : " + std::to_string(slot.offset));
+
+    printRow("length : " + std::to_string(slot.length) + " bytes");
+
+    if (slot.length == 0) {
+
+      printRow("status : TOMBSTONED / DELETED");
 
     } else {
 
-      WALOU_ERROR("Message verification: FAIL");
-      return 1;
+      printRow("status : ACTIVE");
     }
 
-    // --------------------------------------------------
-    // Verify every byte
-    // --------------------------------------------------
-
-    WALOU_INFO("Starting byte-for-byte verification...");
-
-    const char *recovered_data = recovered_page.getData();
-
-    const std::size_t message_size = std::strlen(expected_message) + 1;
-
-    bool bytes_match = true;
-
-    for (std::size_t i = 0; i < WalouDB::PAGE_SIZE; ++i) {
-
-      char expected;
-
-      if (i < message_size) {
-        expected = expected_message[i];
-      } else {
-        expected = static_cast<char>(i % 256);
-      }
-
-      if (recovered_data[i] != expected) {
-        WALOU_ERROR(
-            "Byte mismatch at offset {}: expected {}, got {}", i,
-            static_cast<int>(static_cast<unsigned char>(expected)),
-            static_cast<int>(static_cast<unsigned char>(recovered_data[i])));
-
-        bytes_match = false;
-        break;
-      }
-    }
-
-    if (!bytes_match) {
-      WALOU_ERROR("Byte-for-byte verification: FAIL");
-      return 1;
-    }
-
-    WALOU_INFO("Byte-for-byte verification: PASS ({} bytes)",
-               WalouDB::PAGE_SIZE);
-
-    // --------------------------------------------------
-    // Display some raw bytes
-    // --------------------------------------------------
-
-    std::cout << "\nFirst 32 bytes (hex):\n";
-    std::cout << "----------------------------------------\n";
-
-    for (std::size_t i = 0; i < 32; ++i) {
-      std::cout << std::hex << std::setw(2) << std::setfill('0')
-                << static_cast<int>(
-                       static_cast<unsigned char>(recovered_data[i]))
-                << ' ';
-    }
-
-    std::cout << std::dec << "\n";
-    std::cout << "----------------------------------------\n";
-
-    // Last 16 bytes.
-    std::cout << "\nLast 16 bytes (hex):\n";
-    std::cout << "----------------------------------------\n";
-
-    for (std::size_t i = WalouDB::PAGE_SIZE - 16; i < WalouDB::PAGE_SIZE; ++i) {
-
-      std::cout << std::hex << std::setw(2) << std::setfill('0')
-                << static_cast<int>(
-                       static_cast<unsigned char>(recovered_data[i]))
-                << ' ';
-    }
-
-    std::cout << std::dec << "\n";
-    std::cout << "----------------------------------------\n";
-
-    WALOU_INFO("All DiskManager tests passed");
+    printBorder();
   }
 
-  // ==================================================
-  // Final result
-  // ==================================================
+  // ==========================================================
+  // Free Space
+  // ==========================================================
 
-  WALOU_INFO("========================================");
-  WALOU_INFO("       TEST RESULT: PASS");
-  WALOU_INFO("========================================");
+  std::cout << "\n";
+
+  std::cout << "              <--------- FREE SPACE --------->\n\n";
+
+  printBorder();
+
+  printRow("FREE SPACE");
+
+  printRow("from offset " + std::to_string(lower));
+
+  printRow("to offset   " + std::to_string(upper));
+
+  printRow("total       " + std::to_string(free_space) + " bytes");
+
+  printBorder();
+
+  // ==========================================================
+  // Tuple Data
+  // ==========================================================
+
+  std::cout << "\n";
+
+  std::cout << "                    TUPLE DATA\n\n";
+
+  // We print tuples from lowest physical offset
+  // to highest physical offset.
+  //
+  // Since tuple data grows downward from PAGE_SIZE,
+  // the newest tuple usually appears first.
+
+  struct TupleInfo {
+    uint16_t slot_num;
+    Slot slot;
+  };
+
+  std::vector<TupleInfo> tuples;
+
+  // Collect all slots.
+
+  for (uint16_t i = 0; i < slot_count; ++i) {
+
+    auto slot_opt = page.getSlotInfo(i);
+
+    if (!slot_opt.has_value()) {
+      continue;
+    }
+
+    tuples.push_back({i, *slot_opt});
+  }
+
+  // Sort by physical memory offset.
+
+  std::sort(tuples.begin(), tuples.end(),
+
+            [](const TupleInfo &a, const TupleInfo &b) {
+              return a.slot.offset < b.slot.offset;
+            });
+
+  // ==========================================================
+  // Print each tuple
+  // ==========================================================
+
+  for (const TupleInfo &info : tuples) {
+
+    const uint16_t slot_num = info.slot_num;
+
+    const Slot slot = info.slot;
+
+    // --------------------------------------------------------
+    // Tombstoned tuple
+    // --------------------------------------------------------
+
+    if (slot.length == 0) {
+
+      printBorder();
+
+      printRow("TUPLE " + std::to_string(slot_num) + " - DELETED");
+
+      printRow("RID = (" + std::to_string(page.getId()) + ", " +
+               std::to_string(slot_num) + ")");
+
+      printRow("offset = " + std::to_string(slot.offset));
+
+      printRow("length = 0 bytes");
+
+      printRow("status = TOMBSTONED");
+
+      printBorder();
+
+      continue;
+    }
+
+    // --------------------------------------------------------
+    // Active tuple
+    // --------------------------------------------------------
+
+    auto tuple_opt = page.getTuple(slot_num);
+
+    if (!tuple_opt.has_value()) {
+      continue;
+    }
+
+    const Tuple &tuple = *tuple_opt;
+
+    printBorder();
+
+    printRow("TUPLE " + std::to_string(slot_num));
+
+    printRow("RID = (" + std::to_string(page.getId()) + ", " +
+             std::to_string(slot_num) + ")");
+
+    printRow("offset = " + std::to_string(slot.offset));
+
+    printRow("length = " + std::to_string(slot.length) + " bytes");
+
+    // --------------------------------------------------------
+    // Print actual tuple values
+    // --------------------------------------------------------
+
+    for (size_t col_idx = 0; col_idx < schema.getColumnCount(); ++col_idx) {
+
+      const Column &column = schema.getColumn(col_idx);
+
+      Value value = tuple.getValue(schema, col_idx);
+
+      // INTEGER
+
+      if (column.type == TypeId::INTEGER) {
+
+        printRow(column.name + " = " + std::to_string(value.getInteger()));
+
+      }
+
+      // VARCHAR
+
+      else if (column.type == TypeId::VARCHAR) {
+
+        printRow(column.name + " = \"" + value.getString() + "\"");
+      }
+    }
+
+    printBorder();
+  }
+
+  // ==========================================================
+  // End of memory
+  // ==========================================================
+
+  std::cout << "\n";
+
+  std::cout << "     ^\n";
+
+  std::cout << "     |\n";
+
+  std::cout << "MEMORY OFFSET " << PAGE_SIZE << "\n\n";
+}
+
+// ============================================================
+// Insert
+// ============================================================
+
+bool insertTuple(SlottedPage &page, const Schema &schema) {
+  printTitle("INSERT TUPLE");
+
+  int id = readInt("Enter id: ");
+
+  std::string name = readString("Enter name: ");
+
+  Tuple tuple = Tuple::Serialize(
+      {
+          Value(static_cast<int32_t>(id)),
+          Value(name),
+      },
+      schema);
+
+  RID rid{};
+
+  std::cout << "\nTuple size: " << tuple.getLength() << " bytes\n";
+
+  std::cout << "Free space before: " << page.freeSpace() << " bytes\n";
+
+  bool success = page.insertTuple(tuple, &rid);
+
+  if (!success) {
+    std::cout << "\n[FAILED] Not enough free space.\n";
+    return false;
+  }
+
+  std::cout << "\n[SUCCESS] Tuple inserted.\n";
+
+  std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
+
+  std::cout << "Free space after: " << page.freeSpace() << " bytes\n";
+
+  return true;
+}
+
+// ============================================================
+// Delete
+// ============================================================
+
+bool deleteTuple(SlottedPage &page) {
+  printTitle("DELETE TUPLE");
+
+  int slot_num = readInt("Enter slot number: ");
+
+  if (slot_num < 0) {
+    std::cout << "Invalid slot number.\n";
+    return false;
+  }
+
+  bool success = page.deleteTuple(static_cast<uint16_t>(slot_num));
+
+  if (success) {
+    std::cout << "\n[SUCCESS] Tuple deleted.\n";
+    std::cout << "The slot is now tombstoned.\n";
+    return true;
+  }
+
+  std::cout << "\n[FAILED] Tuple does not exist or is already deleted.\n";
+
+  return false;
+}
+
+// ============================================================
+// Get tuple
+// ============================================================
+
+void getTuple(const SlottedPage &page, const Schema &schema) {
+  printTitle("GET TUPLE");
+
+  int slot_num = readInt("Enter slot number: ");
+
+  if (slot_num < 0) {
+    std::cout << "Invalid slot number.\n";
+    return;
+  }
+
+  auto tuple_opt = page.getTuple(static_cast<uint16_t>(slot_num));
+
+  if (!tuple_opt.has_value()) {
+    std::cout << "\nTuple not found or deleted.\n";
+    return;
+  }
+
+  const Tuple &tuple = *tuple_opt;
+
+  std::cout << "\n";
+  printBorder();
+
+  printRow("TUPLE " + std::to_string(slot_num));
+
+  for (size_t i = 0; i < schema.getColumnCount(); ++i) {
+    const Column &column = schema.getColumn(i);
+
+    Value value = tuple.getValue(schema, i);
+
+    if (column.type == TypeId::INTEGER) {
+      printRow(column.name + " = " + std::to_string(value.getInteger()));
+    } else if (column.type == TypeId::VARCHAR) {
+      printRow(column.name + " = \"" + value.getString() + "\"");
+    }
+  }
+
+  printBorder();
+}
+
+// ============================================================
+// Menu
+// ============================================================
+
+void printMenu() {
+  printTitle("MENU");
+
+  std::cout << "\n";
+  std::cout << "  1. Insert tuple\n";
+  std::cout << "  2. Get tuple\n";
+  std::cout << "  3. Delete tuple\n";
+  std::cout << "  4. Visualize page\n";
+  std::cout << "  5. Reset page\n";
+  std::cout << "  6. Insert dummy tuples\n";
+  std::cout << "  0. Exit\n";
+  std::cout << "\n";
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+int main() {
+  constexpr page_id_t page_id = 0;
+
+  printTitle("WALOUDB INTERACTIVE SLOTTED PAGE");
+
+  // ----------------------------------------------------------
+  // Open database
+  // ----------------------------------------------------------
+
+  DiskManager disk_manager("test.db");
+
+  // ----------------------------------------------------------
+  // Create RAM page
+  // ----------------------------------------------------------
+
+  Page raw_page;
+
+  // ----------------------------------------------------------
+  // Try to load page from disk
+  // ----------------------------------------------------------
+
+  bool loaded = disk_manager.readPage(page_id, raw_page.getData());
+
+  // ----------------------------------------------------------
+  // Interpret RAM as a slotted page
+  // ----------------------------------------------------------
+
+  SlottedPage page(raw_page.getData());
+
+  if (!loaded) {
+
+    std::cout << "\nNo existing page found.\n";
+
+    std::cout << "Creating new page...\n";
+
+    page.Init(page_id);
+
+    disk_manager.writePage(page_id, raw_page.getData());
+
+    std::cout << "New page created and saved.\n";
+
+  } else {
+
+    std::cout << "\nExisting page loaded from disk.\n";
+  }
+
+  // ----------------------------------------------------------
+  // Schema
+  // ----------------------------------------------------------
+
+  Schema schema = createSchema();
+
+  // ----------------------------------------------------------
+  // Interactive loop
+  // ----------------------------------------------------------
+
+  bool running = true;
+
+  while (running) {
+
+    printMenu();
+
+    int choice = readInt("Choose an option: ");
+
+    switch (choice) {
+
+      // ======================================================
+      // INSERT TUPLE
+      // ======================================================
+
+    case 1: {
+
+      bool success = insertTuple(page, schema);
+
+      if (success) {
+
+        raw_page.setDirty(true);
+
+        disk_manager.writePage(page_id, raw_page.getData());
+
+        raw_page.setDirty(false);
+
+        std::cout << "\nPage automatically "
+                     "saved to disk.\n";
+      }
+
+      break;
+    }
+
+      // ======================================================
+      // GET TUPLE
+      // ======================================================
+
+    case 2:
+
+      getTuple(page, schema);
+
+      break;
+
+      // ======================================================
+      // DELETE TUPLE
+      // ======================================================
+
+    case 3: {
+
+      bool success = deleteTuple(page);
+
+      if (success) {
+
+        raw_page.setDirty(true);
+
+        disk_manager.writePage(page_id, raw_page.getData());
+
+        raw_page.setDirty(false);
+
+        std::cout << "\nPage automatically "
+                     "saved to disk.\n";
+      }
+
+      break;
+    }
+
+      // ======================================================
+      // VISUALIZE
+      // ======================================================
+
+    case 4:
+
+      visualizePage(page, schema);
+
+      break;
+
+      // ======================================================
+      // RESET PAGE
+      // ======================================================
+
+    case 5: {
+
+      printTitle("RESET PAGE");
+
+      raw_page.resetMemory();
+
+      page.Init(page_id);
+
+      raw_page.setDirty(true);
+
+      bool success = disk_manager.writePage(page_id, raw_page.getData());
+
+      if (success) {
+
+        raw_page.setDirty(false);
+
+        std::cout << "\n[SUCCESS] "
+                     "Page reset and saved.\n";
+
+      } else {
+
+        std::cout << "\n[FAILED] "
+                     "Could not save page.\n";
+      }
+
+      break;
+    }
+
+      // ======================================================
+      // INSERT DUMMY TUPLES
+      // ======================================================
+
+    case 6: {
+
+      printTitle("INSERT DUMMY TUPLES");
+
+      int count = readInt("How many dummy tuples? ");
+
+      if (count <= 0) {
+
+        std::cout << "\nInvalid count.\n";
+
+        break;
+      }
+
+      int inserted = 0;
+
+      std::cout << "\n";
+
+      for (int i = 0; i < count; ++i) {
+
+        // ----------------------------------------------------
+        // Generate dummy data
+        // ----------------------------------------------------
+
+        int32_t id = static_cast<int32_t>(page.getSlotCount() + 1);
+
+        std::string name = "Dummy_" + std::to_string(id);
+
+        Tuple tuple = Tuple::Serialize(
+            {
+                Value(id),
+                Value(name),
+            },
+            schema);
+
+        // ----------------------------------------------------
+        // Insert
+        // ----------------------------------------------------
+
+        RID rid{};
+
+        bool success = page.insertTuple(tuple, &rid);
+
+        if (!success) {
+
+          std::cout << "[STOPPED] "
+                       "Page is full.\n";
+
+          break;
+        }
+
+        ++inserted;
+
+        raw_page.setDirty(true);
+
+        // ----------------------------------------------------
+        // Print inserted tuple
+        // ----------------------------------------------------
+
+        std::cout << "[INSERTED] ";
+
+        std::cout << "RID=(" << rid.page_id << ", " << rid.slot_num << ")";
+
+        std::cout << " | id=" << id;
+
+        std::cout << " | name=\"" << name << "\"";
+
+        std::cout << " | size=" << tuple.getLength() << " bytes";
+
+        std::cout << "\n";
+      }
+
+      // ------------------------------------------------------
+      // Automatically save
+      // ------------------------------------------------------
+
+      if (inserted > 0) {
+
+        bool success = disk_manager.writePage(page_id, raw_page.getData());
+
+        if (success) {
+
+          raw_page.setDirty(false);
+
+          std::cout << "\n[SUCCESS] "
+                       "Page saved to disk.\n";
+
+        } else {
+
+          std::cout << "\n[FAILED] "
+                       "Could not save page.\n";
+        }
+      }
+
+      // ------------------------------------------------------
+      // Summary
+      // ------------------------------------------------------
+
+      std::cout << "\n";
+
+      printBorder();
+
+      printRow("DUMMY INSERT SUMMARY");
+
+      printRow("Requested : " + std::to_string(count));
+
+      printRow("Inserted  : " + std::to_string(inserted));
+
+      printRow("Slots     : " + std::to_string(page.getSlotCount()));
+
+      printRow("Free space: " + std::to_string(page.freeSpace()) + " bytes");
+
+      printBorder();
+
+      break;
+    }
+
+      // ======================================================
+      // EXIT
+      // ======================================================
+
+    case 0: {
+
+      std::cout << "\nSaving page before exit...\n";
+
+      bool success = disk_manager.writePage(page_id, raw_page.getData());
+
+      if (success) {
+
+        raw_page.setDirty(false);
+
+        std::cout << "[SUCCESS] "
+                     "Page saved to disk.\n";
+
+      } else {
+
+        std::cout << "[FAILED] "
+                     "Could not save page to disk.\n";
+      }
+
+      std::cout << "Goodbye.\n";
+
+      running = false;
+
+      break;
+    }
+
+      // ======================================================
+      // INVALID OPTION
+      // ======================================================
+
+    default:
+
+      std::cout << "\nInvalid option.\n";
+
+      break;
+    }
+  }
 
   return 0;
 }
