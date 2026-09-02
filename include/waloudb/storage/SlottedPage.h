@@ -10,12 +10,12 @@ struct PageHeader {
   uint16_t lower; // end of slot array / start of free space
   uint16_t upper; // start of tuple data / end of free space
   uint16_t slot_count;
-  uint16_t version;
 };
 
 struct Slot {
   uint16_t offset; // byte offset from page start where the tuple begins
-  uint16_t length; // 0 == tombstoned/deleted
+  uint16_t length;
+  bool deleted{false};
 };
 
 struct RID {
@@ -30,7 +30,7 @@ public:
 
   void Init(page_id_t page_id);
 
-  page_id_t getId() const { return getHeader()->page_id; }
+  page_id_t getPageId() const { return getHeader()->page_id; }
 
   bool insertTuple(const Tuple &tuple, RID *out_rid);
 
@@ -42,8 +42,9 @@ public:
 
   uint16_t getLower() const { return getHeader()->lower; }
   uint16_t getUpper() const { return getHeader()->upper; }
-  uint16_t getVersion() const { return getHeader()->version; }
   uint16_t getSlotCount() const { return getHeader()->slot_count; }
+  int findReusableSlot(uint16_t required_size) const;
+
   std::optional<Slot> getSlotInfo(uint16_t idx) const {
     if (idx >= getHeader()->slot_count) {
       return std::nullopt;

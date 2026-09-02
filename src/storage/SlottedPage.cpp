@@ -10,47 +10,31 @@ void SlottedPage::Init(page_id_t page_id) {
   h->lower = sizeof(PageHeader);
   h->upper = static_cast<uint16_t>(PAGE_SIZE);
   h->slot_count = 0;
-  h->version = 1;
 }
-
 bool SlottedPage::insertTuple(const Tuple &tuple, RID *out_rid) {
   PageHeader *h = getHeader();
 
-  int reuse_idx = findTombstonedSlot();
-  bool needs_new_slot = (reuse_idx == -1);
-
   uint16_t tuple_len = tuple.getLength();
 
-  uint16_t required = tuple_len + (needs_new_slot ? sizeof(Slot) : 0);
+  uint16_t required = tuple_len + sizeof(Slot);
 
   if (freeSpace() < required) {
     return false;
   }
 
-  // Move upper to make room for tuple data.
   h->upper -= tuple_len;
-
-  // Copy tuple bytes into the page.
   std::memcpy(m_data + h->upper, tuple.getData(), tuple_len);
+  uint16_t slot_idx = h->slot_count;
 
-  uint16_t slot_idx;
+  h->slot_count++;
+  h->lower += sizeof(Slot);
 
-  if (needs_new_slot) {
-    slot_idx = h->slot_count;
-
-    h->slot_count++;
-    h->lower += sizeof(Slot);
-  } else {
-    slot_idx = static_cast<uint16_t>(reuse_idx);
-  }
-
-  // Store the location of the tuple in the slot.
   Slot *slot = getSlot(slot_idx);
 
   slot->offset = h->upper;
   slot->length = tuple_len;
+  slot->deleted = false;
 
-  // Return RID to caller.
   out_rid->page_id = h->page_id;
   out_rid->slot_num = slot_idx;
 
@@ -82,7 +66,7 @@ std::optional<Tuple> SlottedPage::getTuple(uint16_t slot_num) const {
 
   const Slot *slot = getSlot(slot_num);
 
-  if (slot->length == 0) {
+  if (slot->deleted == true || slot->length == 0) {
     return std::nullopt;
   }
 
@@ -103,6 +87,7 @@ bool SlottedPage::deleteTuple(uint16_t slot_num) {
   }
 
   slot->length = 0;
+  slot->deleted = true;
 
   return true;
 }
@@ -110,11 +95,10 @@ bool SlottedPage::deleteTuple(uint16_t slot_num) {
 int SlottedPage::findTombstonedSlot() const {
   const PageHeader *h = getHeader();
   for (uint16_t i = 0; i < h->slot_count; i++) {
-    if (getSlot(i)->length == 0) {
+    if (getSlot(i)->deleted == true) {
       return i;
     }
   }
   return -1;
 }
-
 } // namespace WalouDB

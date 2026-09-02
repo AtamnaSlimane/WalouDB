@@ -38,21 +38,23 @@ target_link_libraries(
 # Tests
 # ========================
 
-add_executable(
-    DiskManagerTest
-    tests/DiskManagerTest.cpp
-    src/storage/DiskManager.cpp
-    src/core/Log.cpp
-)
+file(GLOB TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 
-target_include_directories(
-    DiskManagerTest
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(
-    DiskManagerTest
-    PRIVATE
-        spdlog::spdlog
-)
+foreach(TEST_SOURCE ${TEST_SOURCES})
+    get_filename_component(TEST_NAME ${TEST_SOURCE} NAME_WE)
+
+    add_executable(${TEST_NAME}
+        ${TEST_SOURCE}
+    )
+
+    target_include_directories(${TEST_NAME}
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(${TEST_NAME}
+        PRIVATE
+            spdlog::spdlog
+    )
+endforeach()
