@@ -5,6 +5,7 @@
 #include <list>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 namespace WalouDB {
 // least recently Used Pages
 class Lrur {
@@ -13,14 +14,20 @@ public:
   bool Victim(frame_id_t *frame_id);
   void Pin(frame_id_t frame_id);
   void Unpin(frame_id_t frame_id);
+
+  // debug
   bool contains(frame_id_t frame_id) const {
+
     std::lock_guard<std::mutex> guard(m_latch);
     return m_position.count(frame_id) > 0;
   }
-
   size_t size() const {
     std::lock_guard<std::mutex> guard(m_latch);
     return m_lru_list.size();
+  }
+  std::vector<frame_id_t> getFrames() const {
+
+    return {m_lru_list.begin(), m_lru_list.end()};
   }
 
 private:

@@ -33,7 +33,7 @@ public:
   page_id_t getPageId() const { return getHeader()->page_id; }
 
   bool insertTuple(const Tuple &tuple, RID *out_rid);
-
+  bool updateTuple(uint16_t slot_num, const Tuple &tuple);
   std::optional<Tuple> getTuple(uint16_t slot_num) const;
 
   bool deleteTuple(uint16_t slot_num);
@@ -44,7 +44,9 @@ public:
   uint16_t getUpper() const { return getHeader()->upper; }
   uint16_t getSlotCount() const { return getHeader()->slot_count; }
   int findReusableSlot(uint16_t required_size) const;
+  void compact(); // deal with dead space from deleting/updating tuples
 
+  // debug only
   std::optional<Slot> getSlotInfo(uint16_t idx) const {
     if (idx >= getHeader()->slot_count) {
       return std::nullopt;

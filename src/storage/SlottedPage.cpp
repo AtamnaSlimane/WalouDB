@@ -1,5 +1,7 @@
 #include "waloudb/storage/SlottedPage.h"
 #include "waloudb/common/Types.h"
+#include "waloudb/storage/Tuple.h"
+#include <cstdint>
 #include <cstring>
 
 namespace WalouDB {
@@ -33,12 +35,36 @@ bool SlottedPage::insertTuple(const Tuple &tuple, RID *out_rid) {
 
   slot->offset = h->upper;
   slot->length = tuple_len;
-  slot->deleted = false;
 
   out_rid->page_id = h->page_id;
   out_rid->slot_num = slot_idx;
 
   return true;
+}
+
+bool SlottedPage::updateTuple(uint16_t slot_num, const Tuple &tuple) {
+  uint16_t tuple_len = tuple.getLength();
+  auto old_tuple = getTuple(slot_num);
+  if (!old_tuple.has_value()) {
+    return false;
+  }
+  auto slot = getSlot(slot_num);
+  if (tuple_len <= old_tuple->getLength()) {
+    memcpy(m_data + slot->offset, tuple.getData(), tuple_len);
+    slot->length = tuple_len;
+    return true;
+  } else {
+    PageHeader *h = getHeader();
+    if (tuple_len > freeSpace()) {
+      return false;
+    }
+    h->upper -= tuple_len;
+    memcpy(m_data + h->upper, tuple.getData(), tuple_len);
+    slot = getSlot(slot_num);
+    slot->offset = h->upper;
+    slot->length = tuple_len;
+    return true;
+  }
 }
 
 uint16_t SlottedPage::freeSpace() const {
@@ -101,4 +127,6 @@ int SlottedPage::findTombstonedSlot() const {
   }
   return -1;
 }
+void SlottedPage::compact() {}
+
 } // namespace WalouDB

@@ -22,6 +22,36 @@ public:
   bool deletePage(page_id_t page_id);
 
   size_t getPoolSize() const { return m_pool_size; }
+  page_id_t getFramePageId(frame_id_t frame_id) const {
+    // debug
+    if (frame_id < 0 || frame_id >= static_cast<frame_id_t>(m_pool_size)) {
+
+      return INVALID_PAGE_ID;
+    }
+
+    return m_pages[frame_id].getPageId();
+  }
+  int getFramePinCount(frame_id_t frame_id) const {
+
+    if (frame_id < 0 || frame_id >= static_cast<frame_id_t>(m_pool_size)) {
+
+      return -1;
+    }
+
+    return m_pages[frame_id].getPinCount();
+  }
+
+  bool getFrameDirty(frame_id_t frame_id) const {
+
+    if (frame_id < 0 || frame_id >= static_cast<frame_id_t>(m_pool_size)) {
+
+      return false;
+    }
+
+    return m_pages[frame_id].isDirty();
+  }
+
+  const Lrur &getReplacer() const { return *m_replacer; }
 
 private:
   DiskManager *m_diskmanager;
