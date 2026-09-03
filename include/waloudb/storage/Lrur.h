@@ -26,7 +26,7 @@ public:
     return m_lru_list.size();
   }
   std::vector<frame_id_t> getFrames() const {
-
+    std::lock_guard<std::mutex> guard(m_latch);
     return {m_lru_list.begin(), m_lru_list.end()};
   }
 

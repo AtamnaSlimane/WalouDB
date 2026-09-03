@@ -63,8 +63,6 @@ private:
   }
   Slot *getSlot(uint16_t);
   const Slot *getSlot(uint16_t) const;
-
-  int findTombstonedSlot() const;
 };
 
 } // namespace WalouDB

@@ -4,6 +4,7 @@
 #include "waloudb/storage/Lrur.h"
 #include "waloudb/storage/Page.h"
 #include <algorithm>
+#include <cassert>
 #include <memory>
 #include <mutex>
 
@@ -104,7 +105,7 @@ bool BufferPoolManager::flushPage(page_id_t page_id) {
   if (it == m_pages_table.end()) {
     return false;
   }
-  Page &page = m_pages[page_id];
+  Page &page = m_pages[it->second];
   m_diskmanager->writePage(page_id, page.getData());
   page.setDirty(false); // same as disk
 

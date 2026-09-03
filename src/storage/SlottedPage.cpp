@@ -3,10 +3,11 @@
 #include "waloudb/storage/Tuple.h"
 #include <cstdint>
 #include <cstring>
+#include <spdlog/common.h>
 
 namespace WalouDB {
 void SlottedPage::Init(page_id_t page_id) {
-  PageHeader *h = getHeader();
+  auto h = getHeader();
 
   h->page_id = page_id;
   h->lower = sizeof(PageHeader);
@@ -14,11 +15,18 @@ void SlottedPage::Init(page_id_t page_id) {
   h->slot_count = 0;
 }
 bool SlottedPage::insertTuple(const Tuple &tuple, RID *out_rid) {
-  PageHeader *h = getHeader();
+  auto h = getHeader();
 
   uint16_t tuple_len = tuple.getLength();
 
   uint16_t required = tuple_len + sizeof(Slot);
+
+  if (freeSpace() < required) {
+    compact();
+    if (freeSpace() < required) {
+      return false;
+    }
+  }
 
   if (freeSpace() < required) {
     return false;
@@ -45,6 +53,7 @@ bool SlottedPage::insertTuple(const Tuple &tuple, RID *out_rid) {
 bool SlottedPage::updateTuple(uint16_t slot_num, const Tuple &tuple) {
   uint16_t tuple_len = tuple.getLength();
   auto old_tuple = getTuple(slot_num);
+
   if (!old_tuple.has_value()) {
     return false;
   }
@@ -53,18 +62,24 @@ bool SlottedPage::updateTuple(uint16_t slot_num, const Tuple &tuple) {
     memcpy(m_data + slot->offset, tuple.getData(), tuple_len);
     slot->length = tuple_len;
     return true;
-  } else {
-    PageHeader *h = getHeader();
+  }
+  if (tuple_len > freeSpace()) {
+    compact();
     if (tuple_len > freeSpace()) {
       return false;
     }
-    h->upper -= tuple_len;
-    memcpy(m_data + h->upper, tuple.getData(), tuple_len);
     slot = getSlot(slot_num);
-    slot->offset = h->upper;
-    slot->length = tuple_len;
-    return true;
   }
+  auto h = getHeader();
+  if (tuple_len > freeSpace()) {
+    return false;
+  }
+  h->upper -= tuple_len;
+  memcpy(m_data + h->upper, tuple.getData(), tuple_len);
+  slot = getSlot(slot_num);
+  slot->offset = h->upper;
+  slot->length = tuple_len;
+  return true;
 }
 
 uint16_t SlottedPage::freeSpace() const {
@@ -100,7 +115,7 @@ std::optional<Tuple> SlottedPage::getTuple(uint16_t slot_num) const {
 }
 
 bool SlottedPage::deleteTuple(uint16_t slot_num) {
-  PageHeader *h = getHeader();
+  auto h = getHeader();
 
   if (slot_num >= h->slot_count) {
     return false;
@@ -108,7 +123,7 @@ bool SlottedPage::deleteTuple(uint16_t slot_num) {
 
   Slot *slot = getSlot(slot_num);
 
-  if (slot->length == 0) {
+  if (slot->length == 0 || slot->deleted) {
     return false;
   }
 
@@ -118,15 +133,38 @@ bool SlottedPage::deleteTuple(uint16_t slot_num) {
   return true;
 }
 
-int SlottedPage::findTombstonedSlot() const {
-  const PageHeader *h = getHeader();
+void SlottedPage::compact() {
+  auto h = getHeader();
+
+  char tmp[PAGE_SIZE]{};
+
+  std::vector<uint16_t> offsets(h->slot_count, 0);
+
+  uint16_t tmp_upper = PAGE_SIZE;
   for (uint16_t i = 0; i < h->slot_count; i++) {
-    if (getSlot(i)->deleted == true) {
-      return i;
+    auto slot = getSlot(i);
+    if (slot->deleted) {
+      continue;
     }
+    tmp_upper -= slot->length;
+    memcpy(tmp + tmp_upper, m_data + slot->offset, slot->length);
+    offsets[i] = tmp_upper;
   }
-  return -1;
+  memset(m_data + h->lower, 0, PAGE_SIZE - h->lower);
+
+  memcpy(m_data + tmp_upper, tmp + tmp_upper, PAGE_SIZE - tmp_upper);
+
+  for (uint16_t i = 0; i < h->slot_count; i++) {
+    auto slot = getSlot(i);
+    if (slot->deleted) {
+      slot->offset = 0;
+      slot->length = 0;
+      continue;
+    }
+    slot->offset = offsets[i];
+  }
+
+  h->upper = tmp_upper;
 }
-void SlottedPage::compact() {}
 
 } // namespace WalouDB

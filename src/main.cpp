@@ -1,24 +1,19 @@
-#include <algorithm>
-#include <cstdlib>
-#include <cstring>
-#include <filesystem>
-#include <iomanip>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <sstream>
-#include <string>
-#include <vector>
-
 #include "waloudb/common/Types.h"
 #include "waloudb/storage/BufferPoolManager.h"
 #include "waloudb/storage/DiskManager.h"
-#include "waloudb/storage/Lrur.h"
 #include "waloudb/storage/Page.h"
 #include "waloudb/storage/Schema.h"
 #include "waloudb/storage/SlottedPage.h"
 #include "waloudb/storage/Tuple.h"
 #include "waloudb/storage/Value.h"
+
+#include <algorithm>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 using namespace WalouDB;
 
@@ -28,1141 +23,1528 @@ using namespace WalouDB;
 
 constexpr size_t BUFFER_POOL_SIZE = 5;
 
-const std::string DATABASE_FILE = "waloudb_playground.db";
+const std::string DATABASE_FILE = "waloudb.db";
 
 // ============================================================
 // Schema
 // ============================================================
-//
-// For now the playground uses:
-//
-// id   INTEGER
-// name VARCHAR
-//
-// Later we can make the schema interactive.
-//
 
-Schema getDefaultSchema() {
-
-  return Schema(
-      {Column("id", TypeId::INTEGER), Column("name", TypeId::VARCHAR)});
+Schema createSchema() {
+  return Schema({
+      {"id", TypeId::INTEGER},
+      {"name", TypeId::VARCHAR},
+  });
 }
 
 // ============================================================
-// Application State
-// ============================================================
-
-struct AppState {
-
-  std::unique_ptr<DiskManager> disk;
-  std::unique_ptr<BufferPoolManager> buffer_pool;
-
-  std::vector<page_id_t> known_pages;
-
-  page_id_t current_page_id = INVALID_PAGE_ID;
-};
-
-// ============================================================
-// Utility
+// Input helpers
 // ============================================================
 
 void clearInput() {
-
   std::cin.clear();
 
   std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
 
-void waitForEnter() {
+int readInt(const std::string &prompt) {
 
-  std::cout << "\nPress ENTER to continue...";
-  std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+  int value;
+
+  while (true) {
+
+    std::cout << prompt;
+
+    if (std::cin >> value) {
+
+      clearInput();
+
+      return value;
+    }
+
+    std::cout << "\nInvalid number. Try again.\n\n";
+
+    clearInput();
+  }
 }
 
-void clearScreen() {
+std::string readString(const std::string &prompt) {
 
-#ifdef _WIN32
+  std::string value;
 
-  std::system("cls");
+  std::cout << prompt;
 
-#else
+  std::getline(std::cin, value);
 
-  std::system("clear");
-
-#endif
+  return value;
 }
 
-void printLine(char c = '=', int width = 70) {
+// ============================================================
+// Visual helpers
+// ============================================================
 
-  std::cout << std::string(width, c) << "\n";
+constexpr int VISUAL_WIDTH = 72;
+
+void printLine(char c = '=') {
+
+  for (int i = 0; i < VISUAL_WIDTH; ++i) {
+    std::cout << c;
+  }
+
+  std::cout << "\n";
 }
 
 void printTitle(const std::string &title) {
 
-  printLine();
-
-  std::cout << " " << title << "\n";
-
-  printLine();
-}
-
-bool pageExists(const AppState &state, page_id_t page_id) {
-
-  return std::find(state.known_pages.begin(), state.known_pages.end(),
-                   page_id) != state.known_pages.end();
-}
-
-// ============================================================
-// Tuple Helpers
-// ============================================================
-
-Tuple createTuple(int32_t id, const std::string &name) {
-
-  return Tuple::Serialize({Value(id), Value(name)}, getDefaultSchema());
-}
-
-void printTupleValues(const Tuple &tuple) {
-
-  Schema schema = getDefaultSchema();
-
-  try {
-
-    Value id = tuple.getValue(schema, 0);
-
-    Value name = tuple.getValue(schema, 1);
-
-    std::cout << "id=" << id.getInteger() << ", ";
-
-    std::cout << "name=\"" << name.getString() << "\"";
-
-  } catch (...) {
-
-    std::cout << "<unable to deserialize tuple>";
-  }
-}
-
-// ============================================================
-// MAIN MENU
-// ============================================================
-
-void printMainMenu(const AppState &state) {
-
-  printTitle("WALOUDB STORAGE PLAYGROUND");
-
   std::cout << "\n";
 
-  if (state.current_page_id == INVALID_PAGE_ID) {
+  printLine('=');
 
-    std::cout << "Current Page: "
-              << "NONE\n";
+  std::cout << "  " << title << "\n";
 
-  } else {
+  printLine('=');
+}
 
-    std::cout << "Current Page: " << state.current_page_id << "\n";
+void printBorder() {
+
+  std::cout << "+--------------------------------------------------------------"
+               "--------+\n";
+}
+
+void printRow(const std::string &text) {
+
+  std::cout << "| " << std::left << std::setw(68) << text << " |\n";
+}
+
+void waitForEnter() {
+
+  std::cout << "\nPress ENTER to continue...";
+
+  std::cin.get();
+}
+
+// ============================================================
+// Page helpers
+// ============================================================
+
+bool isValidPageId(page_id_t page_id) { return page_id != INVALID_PAGE_ID; }
+
+// ============================================================
+// Active page helper
+// ============================================================
+
+Page *fetchActivePage(BufferPoolManager &bpm, page_id_t active_page_id) {
+
+  if (!isValidPageId(active_page_id)) {
+
+    std::cout << "\nNo active page selected.\n";
+
+    return nullptr;
   }
 
-  std::cout << "Known Pages: " << state.known_pages.size() << "\n";
-
-  std::cout << "\n";
-
-  printLine('-');
-
-  std::cout << "\n";
-
-  std::cout << "  1. Create New Page\n";
-  std::cout << "  2. Switch / Fetch Page\n";
-  std::cout << "  3. Insert Tuple\n";
-  std::cout << "  4. Delete Tuple\n";
-  std::cout << "  5. Visualize Current Page\n";
-  std::cout << "  6. Visualize Buffer Pool\n";
-  std::cout << "  7. Visualize LRU Replacer\n";
-  std::cout << "  8. List All Known Pages\n";
-  std::cout << "  9. Flush Current Page\n";
-  std::cout << " 10. Flush All Pages\n";
-  std::cout << " 11. Run Storage Overview\n";
-  std::cout << "  0. Exit\n";
-
-  std::cout << "\n";
-
-  printLine('-');
-
-  std::cout << "\nChoice: ";
-}
-
-// ============================================================
-// CREATE PAGE
-// ============================================================
-
-void createNewPage(AppState &state) {
-
-  printTitle("CREATE NEW PAGE");
-
-  page_id_t page_id;
-
-  Page *page = state.buffer_pool->newPage(&page_id);
+  Page *page = bpm.fetchPage(active_page_id);
 
   if (page == nullptr) {
 
-    std::cout << "\n[ERROR] "
-              << "Could not allocate a page.\n";
-
-    std::cout << "The buffer pool may be full and "
-              << "all pages may be pinned.\n";
-
-    return;
+    std::cout << "\n[FAILED] Could not fetch active page.\n";
   }
 
-  // Initialize slotted page.
-  SlottedPage slotted(page->getData());
-
-  slotted.Init(page_id);
-
-  state.known_pages.push_back(page_id);
-
-  state.current_page_id = page_id;
-
-  // Mark dirty and unpin.
-  state.buffer_pool->unpinPage(page_id, true);
-
-  std::cout << "\n";
-
-  std::cout << "[SUCCESS] Created page " << page_id << "\n";
-
-  std::cout << "Current page switched to " << page_id << "\n";
+  return page;
 }
 
 // ============================================================
-// SWITCH PAGE
+// Tuple printing
 // ============================================================
 
-void switchPage(AppState &state) {
+void printTupleValues(const Tuple &tuple, const Schema &schema) {
 
-  printTitle("SWITCH PAGE");
+  for (size_t i = 0; i < schema.getColumnCount(); ++i) {
 
-  if (state.known_pages.empty()) {
+    const Column &column = schema.getColumn(i);
 
-    std::cout << "\nNo pages exist yet.\n";
+    Value value = tuple.getValue(schema, i);
+
+    if (column.type == TypeId::INTEGER) {
+
+      printRow(column.name + " = " + std::to_string(value.getInteger()));
+    }
+
+    else if (column.type == TypeId::VARCHAR) {
+
+      printRow(column.name + " = \"" + value.getString() + "\"");
+    }
+  }
+}
+
+// ============================================================
+// Visualize single page
+// ============================================================
+
+void visualizePage(const SlottedPage &page, const Schema &schema) {
+
+  const uint16_t lower = page.getLower();
+
+  const uint16_t upper = page.getUpper();
+
+  const uint16_t slot_count = page.getSlotCount();
+
+  const uint16_t free_space = page.freeSpace();
+
+  // ----------------------------------------------------------
+  // Statistics
+  // ----------------------------------------------------------
+
+  uint32_t live_tuple_bytes = 0;
+
+  uint16_t active_slots = 0;
+  uint16_t deleted_slots = 0;
+
+  for (uint16_t i = 0; i < slot_count; ++i) {
+
+    auto slot_opt = page.getSlotInfo(i);
+
+    if (!slot_opt.has_value()) {
+      continue;
+    }
+
+    const Slot &slot = *slot_opt;
+
+    if (slot.deleted || slot.length == 0) {
+
+      ++deleted_slots;
+
+    } else {
+
+      ++active_slots;
+
+      live_tuple_bytes += slot.length;
+    }
+  }
+
+  const uint32_t header_bytes = sizeof(PageHeader);
+
+  const uint32_t slot_directory_bytes = slot_count * sizeof(Slot);
+
+  // ==========================================================
+  // Title
+  // ==========================================================
+
+  printTitle("WALOUDB PAGE VISUALIZER - PAGE " +
+             std::to_string(page.getPageId()));
+
+  // ==========================================================
+  // Header
+  // ==========================================================
+
+  printBorder();
+
+  printRow("PAGE HEADER");
+
+  printRow("page_id    = " + std::to_string(page.getPageId()));
+
+  printRow("lower      = " + std::to_string(lower));
+
+  printRow("upper      = " + std::to_string(upper));
+
+  printRow("slot_count = " + std::to_string(slot_count));
+
+  printBorder();
+
+  // ==========================================================
+  // Statistics
+  // ==========================================================
+
+  std::cout << "\n";
+
+  printBorder();
+
+  printRow("PAGE STATISTICS");
+
+  printRow("page size = " + std::to_string(PAGE_SIZE) + " bytes");
+
+  printRow("header size = " + std::to_string(header_bytes) + " bytes");
+
+  printRow("slot directory size = " + std::to_string(slot_directory_bytes) +
+           " bytes");
+
+  printRow("active slots = " + std::to_string(active_slots));
+
+  printRow("deleted slots = " + std::to_string(deleted_slots));
+
+  printRow("live tuple data = " + std::to_string(live_tuple_bytes) + " bytes");
+
+  printRow("contiguous free space = " + std::to_string(free_space) + " bytes");
+
+  printBorder();
+
+  // ==========================================================
+  // Memory layout
+  // ==========================================================
+
+  std::cout << "\n";
+
+  printBorder();
+
+  printRow("LOGICAL MEMORY LAYOUT");
+
+  printRow("OFFSET 0");
+
+  printRow("  +-- PAGE HEADER");
+
+  printRow("  |   size = " + std::to_string(header_bytes) + " bytes");
+
+  printRow("  +-- SLOT DIRECTORY");
+
+  printRow("  |   size = " + std::to_string(slot_directory_bytes) + " bytes");
+
+  printRow("  +-- lower = " + std::to_string(lower));
+
+  printRow("  |");
+
+  printRow("  |      FREE SPACE");
+
+  printRow("  |      " + std::to_string(free_space) + " bytes");
+
+  printRow("  |");
+
+  printRow("  +-- upper = " + std::to_string(upper));
+
+  printRow("  +-- TUPLE STORAGE");
+
+  printRow("  |   live data = " + std::to_string(live_tuple_bytes) + " bytes");
+
+  printRow("OFFSET " + std::to_string(PAGE_SIZE));
+
+  printBorder();
+
+  // ==========================================================
+  // Slot directory
+  // ==========================================================
+
+  std::cout << "\n";
+
+  printTitle("SLOT DIRECTORY");
+
+  for (uint16_t i = 0; i < slot_count; ++i) {
+
+    auto slot_opt = page.getSlotInfo(i);
+
+    if (!slot_opt.has_value()) {
+      continue;
+    }
+
+    const Slot slot = *slot_opt;
+
+    printBorder();
+
+    printRow("SLOT " + std::to_string(i));
+
+    printRow("offset = " + std::to_string(slot.offset));
+
+    printRow("length = " + std::to_string(slot.length) + " bytes");
+
+    if (slot.deleted || slot.length == 0) {
+
+      printRow("status = TOMBSTONED / DELETED");
+
+    } else {
+
+      printRow("status = ACTIVE");
+    }
+
+    printBorder();
+  }
+
+  if (slot_count == 0) {
+
+    std::cout << "\nNo slots exist yet.\n";
+  }
+
+  // ==========================================================
+  // Free space
+  // ==========================================================
+
+  std::cout << "\n";
+
+  printBorder();
+
+  printRow("FREE SPACE");
+
+  printRow("from offset = " + std::to_string(lower));
+
+  printRow("to offset   = " + std::to_string(upper));
+
+  printRow("total       = " + std::to_string(free_space) + " bytes");
+
+  printBorder();
+
+  // ==========================================================
+  // Tuple data
+  // ==========================================================
+
+  std::cout << "\n";
+
+  printTitle("TUPLE DATA");
+
+  struct TupleInfo {
+
+    uint16_t slot_num;
+
+    Slot slot;
+  };
+
+  std::vector<TupleInfo> tuples;
+
+  for (uint16_t i = 0; i < slot_count; ++i) {
+
+    auto slot_opt = page.getSlotInfo(i);
+
+    if (!slot_opt.has_value()) {
+      continue;
+    }
+
+    tuples.push_back({
+        i,
+        *slot_opt,
+    });
+  }
+
+  std::sort(tuples.begin(), tuples.end(),
+
+            [](const TupleInfo &a, const TupleInfo &b) {
+              return a.slot.offset < b.slot.offset;
+            });
+
+  // ----------------------------------------------------------
+  // Print tuples
+  // ----------------------------------------------------------
+
+  for (const TupleInfo &info : tuples) {
+
+    uint16_t slot_num = info.slot_num;
+
+    const Slot &slot = info.slot;
+
+    printBorder();
+
+    if (slot.deleted || slot.length == 0) {
+
+      printRow("TUPLE SLOT " + std::to_string(slot_num) + " - DELETED");
+
+      printRow("RID = (" + std::to_string(page.getPageId()) + ", " +
+               std::to_string(slot_num) + ")");
+
+      printRow("offset = " + std::to_string(slot.offset));
+
+      printRow("length = 0 bytes");
+
+      printRow("status = TOMBSTONED");
+
+      printBorder();
+
+      continue;
+    }
+
+    auto tuple_opt = page.getTuple(slot_num);
+
+    if (!tuple_opt.has_value()) {
+
+      printRow("ERROR: Slot marked active but tuple unavailable.");
+
+      printBorder();
+
+      continue;
+    }
+
+    const Tuple &tuple = *tuple_opt;
+
+    printRow("TUPLE " + std::to_string(slot_num));
+
+    printRow("RID = (" + std::to_string(page.getPageId()) + ", " +
+             std::to_string(slot_num) + ")");
+
+    printRow("offset = " + std::to_string(slot.offset));
+
+    printRow("length = " + std::to_string(slot.length) + " bytes");
+
+    printRow("status = ACTIVE");
+
+    printTupleValues(tuple, schema);
+
+    printBorder();
+  }
+
+  if (active_slots == 0 && deleted_slots == 0) {
+
+    std::cout << "\nNo tuples stored in this page.\n";
+  }
+}
+
+// ============================================================
+// Create new page
+// ============================================================
+
+bool createNewPage(BufferPoolManager &bpm, page_id_t &active_page_id,
+                   std::vector<page_id_t> &known_pages) {
+
+  printTitle("CREATE NEW PAGE");
+
+  page_id_t new_page_id;
+
+  Page *raw = bpm.newPage(&new_page_id);
+
+  if (raw == nullptr) {
+
+    std::cout << "\n[FAILED] No available frame.\n";
+
+    std::cout << "All buffer pool frames may be pinned.\n";
+
+    return false;
+  }
+
+  // ----------------------------------------------------------
+  // Initialize SlottedPage
+  // ----------------------------------------------------------
+
+  SlottedPage page(raw->getData());
+
+  page.Init(new_page_id);
+
+  // Mark dirty and unpin.
+  bpm.unpinPage(new_page_id, true);
+
+  active_page_id = new_page_id;
+
+  known_pages.push_back(new_page_id);
+
+  std::cout << "\n[SUCCESS] New page created.\n";
+
+  std::cout << "Page ID: " << new_page_id << "\n";
+
+  std::cout << "Active page switched to: " << active_page_id << "\n";
+
+  return true;
+}
+
+// ============================================================
+// Switch active page
+// ============================================================
+
+void switchActivePage(page_id_t &active_page_id,
+                      const std::vector<page_id_t> &known_pages,
+                      BufferPoolManager &bpm) {
+
+  printTitle("SWITCH ACTIVE PAGE");
+
+  if (known_pages.empty()) {
+
+    std::cout << "\nNo known pages.\n";
 
     return;
   }
 
   std::cout << "\nKnown pages:\n\n";
 
-  for (page_id_t page_id : state.known_pages) {
+  for (page_id_t id : known_pages) {
 
-    std::cout << "  Page " << page_id;
+    std::cout << "  Page " << id;
 
-    if (page_id == state.current_page_id) {
+    if (id == active_page_id) {
 
-      std::cout << "  <-- CURRENT";
+      std::cout << "  <-- ACTIVE";
     }
 
     std::cout << "\n";
   }
 
-  std::cout << "\nEnter page ID: ";
+  std::cout << "\n";
 
-  page_id_t page_id;
+  int input = readInt("Enter page ID: ");
 
-  std::cin >> page_id;
+  if (input < 0) {
 
-  if (!std::cin) {
-
-    clearInput();
-
-    std::cout << "\nInvalid input.\n";
+    std::cout << "\nInvalid page ID.\n";
 
     return;
   }
 
-  if (!pageExists(state, page_id)) {
+  page_id_t target = static_cast<page_id_t>(input);
 
-    std::cout << "\n[ERROR] Unknown page.\n";
+  // Verify that we know about it.
+  bool found = std::find(known_pages.begin(), known_pages.end(), target) !=
+               known_pages.end();
+
+  if (!found) {
+
+    std::cout << "\n[FAILED] Page is not in the known page list.\n";
 
     return;
   }
 
-  Page *page = state.buffer_pool->fetchPage(page_id);
+  // Try fetching it.
+  Page *page = bpm.fetchPage(target);
 
   if (page == nullptr) {
 
-    std::cout << "\n[ERROR] "
-              << "Could not fetch page.\n";
+    std::cout << "\n[FAILED] Could not fetch page.\n";
 
     return;
   }
 
-  state.current_page_id = page_id;
+  bpm.unpinPage(target, false);
 
-  std::cout << "\n[SUCCESS] Switched to page " << page_id << "\n";
+  active_page_id = target;
 
-  state.buffer_pool->unpinPage(page_id, false);
+  std::cout << "\n[SUCCESS] Active page switched to " << active_page_id
+            << ".\n";
 }
 
 // ============================================================
-// INSERT TUPLE
+// Insert tuple
 // ============================================================
 
-void insertTuple(AppState &state) {
+bool insertTuple(BufferPoolManager &bpm, page_id_t active_page_id,
+                 const Schema &schema) {
 
   printTitle("INSERT TUPLE");
 
-  if (state.current_page_id == INVALID_PAGE_ID) {
-
-    std::cout << "\n[ERROR] "
-              << "Create or switch to a page first.\n";
-
-    return;
-  }
-
-  int32_t id;
-
-  std::string name;
-
-  std::cout << "\nID: ";
-
-  std::cin >> id;
-
-  if (!std::cin) {
-
-    clearInput();
-
-    std::cout << "\nInvalid ID.\n";
-
-    return;
-  }
-
-  clearInput();
-
-  std::cout << "Name: ";
-
-  std::getline(std::cin, name);
-
-  Page *raw = state.buffer_pool->fetchPage(state.current_page_id);
+  Page *raw = fetchActivePage(bpm, active_page_id);
 
   if (raw == nullptr) {
+    return false;
+  }
 
-    std::cout << "\n[ERROR] "
-              << "Could not fetch current page.\n";
+  SlottedPage page(raw->getData());
 
+  int id = readInt("Enter id: ");
+
+  std::string name = readString("Enter name: ");
+
+  Tuple tuple = Tuple::Serialize(
+      {
+          Value(static_cast<int32_t>(id)),
+          Value(name),
+      },
+      schema);
+
+  RID rid{};
+
+  std::cout << "\nTuple size: " << tuple.getLength() << " bytes\n";
+
+  std::cout << "Free space before: " << page.freeSpace() << " bytes\n";
+
+  bool success = page.insertTuple(tuple, &rid);
+
+  // ----------------------------------------------------------
+  // Always release fetched page
+  // ----------------------------------------------------------
+
+  bpm.unpinPage(active_page_id, success);
+
+  if (!success) {
+
+    std::cout << "\n[FAILED] Not enough space.\n";
+
+    return false;
+  }
+
+  std::cout << "\n[SUCCESS] Tuple inserted.\n";
+
+  std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
+
+  return true;
+}
+
+// ============================================================
+// Get tuple
+// ============================================================
+
+void getTuple(BufferPoolManager &bpm, page_id_t active_page_id,
+              const Schema &schema) {
+
+  printTitle("GET TUPLE");
+
+  Page *raw = fetchActivePage(bpm, active_page_id);
+
+  if (raw == nullptr) {
     return;
   }
 
   SlottedPage page(raw->getData());
 
-  Tuple tuple = createTuple(id, name);
+  int input = readInt("Enter slot number: ");
 
-  RID rid;
-
-  bool inserted = page.insertTuple(tuple, &rid);
-
-  if (!inserted) {
-
-    std::cout << "\n[ERROR] "
-              << "Not enough space in page.\n";
-
-    state.buffer_pool->unpinPage(state.current_page_id, false);
-
-    return;
-  }
-
-  state.buffer_pool->unpinPage(state.current_page_id, true);
-
-  std::cout << "\n";
-
-  std::cout << "[SUCCESS] Tuple inserted.\n";
-
-  std::cout << "RID:\n";
-
-  std::cout << "  Page ID : " << rid.page_id << "\n";
-
-  std::cout << "  Slot    : " << rid.slot_num << "\n";
-}
-
-// ============================================================
-// DELETE TUPLE
-// ============================================================
-
-void deleteTuple(AppState &state) {
-
-  printTitle("DELETE TUPLE");
-
-  if (state.current_page_id == INVALID_PAGE_ID) {
-
-    std::cout << "\nNo current page.\n";
-
-    return;
-  }
-
-  uint16_t slot;
-
-  std::cout << "\nSlot number: ";
-
-  std::cin >> slot;
-
-  if (!std::cin) {
-
-    clearInput();
+  if (input < 0) {
 
     std::cout << "\nInvalid slot number.\n";
 
-    return;
-  }
-
-  Page *raw = state.buffer_pool->fetchPage(state.current_page_id);
-
-  if (raw == nullptr) {
-
-    std::cout << "\nCould not fetch page.\n";
+    bpm.unpinPage(active_page_id, false);
 
     return;
   }
 
-  SlottedPage page(raw->getData());
+  uint16_t slot_num = static_cast<uint16_t>(input);
 
-  bool deleted = page.deleteTuple(slot);
+  auto tuple_opt = page.getTuple(slot_num);
 
-  state.buffer_pool->unpinPage(state.current_page_id, deleted);
+  if (!tuple_opt.has_value()) {
 
-  if (!deleted) {
+    std::cout << "\nTuple not found or deleted.\n";
 
-    std::cout << "\n[ERROR] "
-              << "Could not delete tuple.\n";
+    bpm.unpinPage(active_page_id, false);
 
     return;
   }
 
-  std::cout << "\n[SUCCESS] Tuple deleted.\n";
+  printBorder();
 
-  std::cout << "Slot " << slot << " is now a tombstone.\n";
+  printRow("TUPLE " + std::to_string(slot_num));
+
+  printRow("RID = (" + std::to_string(active_page_id) + ", " +
+           std::to_string(slot_num) + ")");
+
+  printTupleValues(*tuple_opt, schema);
+
+  printBorder();
+
+  bpm.unpinPage(active_page_id, false);
 }
 
 // ============================================================
-// PAGE VISUALIZER
+// Update tuple
 // ============================================================
-//
-// This visualizer displays:
-//
-// +------------------------------------------------------+
-// | PAGE HEADER                                          |
-// +------------------------------------------------------+
-// | Page ID                                              |
-// | Slot Count                                           |
-// | Free Space                                           |
-// +------------------------------------------------------+
-// | SLOT DIRECTORY                                       |
-// +------------------------------------------------------+
-// | Slot | Status | Tuple Data                           |
-// +------------------------------------------------------+
-//
-// For a more detailed physical visualizer we will add:
-//
-// Slot offset
-// Tuple size
-// Header size
-// Free-space boundaries
-//
-// once we expose the slot structure.
-//
 
-void visualizePage(AppState &state) {
+bool updateTuple(BufferPoolManager &bpm, page_id_t active_page_id,
+                 const Schema &schema) {
 
-  printTitle("SLOTTED PAGE VISUALIZER");
+  printTitle("UPDATE TUPLE");
 
-  if (state.current_page_id == INVALID_PAGE_ID) {
+  Page *raw = fetchActivePage(bpm, active_page_id);
 
-    std::cout << "\nNo current page.\n";
+  if (raw == nullptr) {
+    return false;
+  }
+
+  SlottedPage page(raw->getData());
+
+  int input = readInt("Enter slot number: ");
+
+  if (input < 0) {
+
+    bpm.unpinPage(active_page_id, false);
+
+    return false;
+  }
+
+  uint16_t slot_num = static_cast<uint16_t>(input);
+
+  auto old_tuple = page.getTuple(slot_num);
+
+  if (!old_tuple.has_value()) {
+
+    std::cout << "\n[FAILED] Tuple does not exist or is deleted.\n";
+
+    bpm.unpinPage(active_page_id, false);
+
+    return false;
+  }
+
+  // ----------------------------------------------------------
+  // Show old tuple
+  // ----------------------------------------------------------
+
+  std::cout << "\nCurrent tuple:\n";
+
+  printBorder();
+
+  printTupleValues(*old_tuple, schema);
+
+  printBorder();
+
+  // ----------------------------------------------------------
+  // New values
+  // ----------------------------------------------------------
+
+  std::cout << "\nEnter new values:\n";
+
+  int id = readInt("New id: ");
+
+  std::string name = readString("New name: ");
+
+  Tuple new_tuple = Tuple::Serialize(
+      {
+          Value(static_cast<int32_t>(id)),
+          Value(name),
+      },
+      schema);
+
+  auto slot_info = page.getSlotInfo(slot_num);
+
+  if (slot_info.has_value()) {
+
+    std::cout << "\nOld tuple size: " << slot_info->length << " bytes\n";
+
+    std::cout << "New tuple size: " << new_tuple.getLength() << " bytes\n";
+  }
+
+  // ----------------------------------------------------------
+  // Update
+  // ----------------------------------------------------------
+
+  bool success = page.updateTuple(slot_num, new_tuple);
+
+  bpm.unpinPage(active_page_id, success);
+
+  if (!success) {
+
+    std::cout << "\n[FAILED] Not enough space.\n";
+
+    return false;
+  }
+
+  std::cout << "\n[SUCCESS] Tuple updated.\n";
+
+  std::cout << "RID remains = (" << active_page_id << ", " << slot_num << ")\n";
+
+  return true;
+}
+
+// ============================================================
+// Delete tuple
+// ============================================================
+
+bool deleteTuple(BufferPoolManager &bpm, page_id_t active_page_id) {
+
+  printTitle("DELETE TUPLE");
+
+  Page *raw = fetchActivePage(bpm, active_page_id);
+
+  if (raw == nullptr) {
+    return false;
+  }
+
+  SlottedPage page(raw->getData());
+
+  int input = readInt("Enter slot number: ");
+
+  if (input < 0) {
+
+    bpm.unpinPage(active_page_id, false);
+
+    return false;
+  }
+
+  bool success = page.deleteTuple(static_cast<uint16_t>(input));
+
+  bpm.unpinPage(active_page_id, success);
+
+  if (success) {
+
+    std::cout << "\n[SUCCESS] Tuple deleted.\n";
+
+    std::cout << "Slot is now tombstoned.\n";
+
+  } else {
+
+    std::cout << "\n[FAILED] Tuple not found or already deleted.\n";
+  }
+
+  return success;
+}
+
+// ============================================================
+// Compact active page
+// ============================================================
+
+bool compactActivePage(BufferPoolManager &bpm, page_id_t active_page_id) {
+
+  printTitle("COMPACT ACTIVE PAGE");
+
+  Page *raw = fetchActivePage(bpm, active_page_id);
+
+  if (raw == nullptr) {
+    return false;
+  }
+
+  SlottedPage page(raw->getData());
+
+  uint16_t before = page.freeSpace();
+
+  std::cout << "\nFree space before: " << before << " bytes\n";
+
+  page.compact();
+
+  uint16_t after = page.freeSpace();
+
+  bpm.unpinPage(active_page_id, true);
+
+  std::cout << "\n[SUCCESS] Page compacted.\n";
+
+  std::cout << "Free space after: " << after << " bytes\n";
+
+  std::cout << "Recovered: " << (after - before) << " bytes\n";
+
+  return true;
+}
+
+// ============================================================
+// Visualize active page
+// ============================================================
+
+void visualizeActivePage(BufferPoolManager &bpm, page_id_t active_page_id,
+                         const Schema &schema) {
+
+  if (!isValidPageId(active_page_id)) {
+
+    std::cout << "\nNo active page.\n";
 
     return;
   }
 
-  Page *raw = state.buffer_pool->fetchPage(state.current_page_id);
+  Page *raw = bpm.fetchPage(active_page_id);
 
   if (raw == nullptr) {
 
-    std::cout << "\nCould not fetch page.\n";
+    std::cout << "\n[FAILED] Could not fetch page.\n";
 
     return;
   }
 
   SlottedPage page(raw->getData());
 
-  uint16_t slot_count = page.getSlotCount();
+  visualizePage(page, schema);
 
-  uint16_t free_space = page.freeSpace();
+  bpm.unpinPage(active_page_id, false);
+}
 
-  // ========================================================
-  // PAGE HEADER
-  // ========================================================
+// ============================================================
+// Visualize all pages
+// ============================================================
 
-  std::cout << "\n";
+void visualizeAllPages(BufferPoolManager &bpm,
+                       const std::vector<page_id_t> &known_pages,
+                       page_id_t active_page_id, const Schema &schema) {
 
-  printLine('=');
+  printTitle("ALL PAGES");
 
-  std::cout << " PAGE HEADER\n";
+  if (known_pages.empty()) {
 
-  printLine('=');
+    std::cout << "\nNo pages created yet.\n";
 
-  std::cout << std::left << std::setw(25) << "Page ID"
-            << ": " << page.getPageId() << "\n";
-
-  std::cout << std::left << std::setw(25) << "Page Size"
-            << ": " << PAGE_SIZE << " bytes\n";
-
-  std::cout << std::left << std::setw(25) << "Slot Count"
-            << ": " << slot_count << "\n";
-
-  std::cout << std::left << std::setw(25) << "Free Space"
-            << ": " << free_space << " bytes\n";
-
-  std::cout << std::left << std::setw(25) << "Used Space"
-            << ": " << PAGE_SIZE - free_space << " bytes\n";
-
-  // ========================================================
-  // MEMORY BAR
-  // ========================================================
-
-  std::cout << "\n";
-
-  printLine('=');
-
-  std::cout << " PAGE SPACE OVERVIEW\n";
-
-  printLine('=');
-
-  constexpr int BAR_WIDTH = 50;
-
-  double used_ratio = static_cast<double>(PAGE_SIZE - free_space) / PAGE_SIZE;
-
-  int used_blocks = static_cast<int>(used_ratio * BAR_WIDTH);
-
-  std::cout << "\n[";
-
-  for (int i = 0; i < BAR_WIDTH; ++i) {
-
-    if (i < used_blocks) {
-
-      std::cout << '#';
-
-    } else {
-
-      std::cout << '.';
-    }
+    return;
   }
 
-  std::cout << "]\n";
+  std::cout << "\nKnown page count: " << known_pages.size() << "\n";
 
-  std::cout << " # = Used\n";
-
-  std::cout << " . = Free\n";
-
-  // ========================================================
-  // SLOT DIRECTORY
-  // ========================================================
-
-  std::cout << "\n";
-
-  printLine('=');
-
-  std::cout << " SLOT DIRECTORY\n";
-
-  printLine('=');
-
-  if (slot_count == 0) {
-
-    std::cout << "\n<No slots>\n";
-
-  } else {
+  for (page_id_t page_id : known_pages) {
 
     std::cout << "\n";
-
-    std::cout << std::left << std::setw(10) << "SLOT"
-
-              << std::setw(15) << "STATUS"
-
-              << "DATA\n";
 
     printLine('-');
 
-    for (uint16_t slot = 0; slot < slot_count; ++slot) {
+    std::cout << "PAGE " << page_id;
 
-      auto tuple = page.getTuple(slot);
+    if (page_id == active_page_id) {
 
-      std::cout << std::left << std::setw(10) << slot;
+      std::cout << "  <-- ACTIVE";
+    }
 
-      if (!tuple.has_value()) {
+    std::cout << "\n";
 
-        std::cout << std::setw(15) << "TOMBSTONE"
+    printLine('-');
 
-                  << "<deleted>\n";
+    Page *raw = bpm.fetchPage(page_id);
 
+    if (raw == nullptr) {
+
+      std::cout << "[FAILED] Could not fetch page.\n";
+
+      continue;
+    }
+
+    SlottedPage page(raw->getData());
+
+    std::cout << "Slots: " << page.getSlotCount() << "\n";
+
+    std::cout << "Free space: " << page.freeSpace() << " bytes\n";
+
+    std::cout << "lower: " << page.getLower() << "\n";
+
+    std::cout << "upper: " << page.getUpper() << "\n";
+
+    // --------------------------------------------------------
+    // Count active/deleted
+    // --------------------------------------------------------
+
+    uint16_t active = 0;
+    uint16_t deleted = 0;
+
+    for (uint16_t i = 0; i < page.getSlotCount(); ++i) {
+
+      auto slot = page.getSlotInfo(i);
+
+      if (!slot.has_value()) {
         continue;
       }
 
-      std::cout << std::setw(15) << "ACTIVE";
+      if (slot->deleted || slot->length == 0) {
 
-      printTupleValues(*tuple);
+        ++deleted;
 
-      std::cout << "\n";
-    }
-  }
+      } else {
 
-  // ========================================================
-  // TUPLE VISUALIZATION
-  // ========================================================
-
-  std::cout << "\n";
-
-  printLine('=');
-
-  std::cout << " TUPLES\n";
-
-  printLine('=');
-
-  bool has_tuple = false;
-
-  for (uint16_t slot = 0; slot < slot_count; ++slot) {
-
-    auto tuple = page.getTuple(slot);
-
-    if (!tuple.has_value()) {
-
-      continue;
+        ++active;
+      }
     }
 
-    has_tuple = true;
+    std::cout << "Active tuples: " << active << "\n";
 
-    std::cout << "\n";
+    std::cout << "Deleted tuples: " << deleted << "\n";
 
-    std::cout << "+--------------------------------------------------+\n";
-
-    std::cout << "| SLOT " << std::setw(43) << std::left << slot << "|\n";
-
-    std::cout << "+--------------------------------------------------+\n";
-
-    std::cout << "| ";
-
-    printTupleValues(*tuple);
-
-    std::cout << "\n";
-
-    std::cout << "+--------------------------------------------------+\n";
-  }
-
-  if (!has_tuple) {
-
-    std::cout << "\n<No active tuples>\n";
-  }
-
-  // ========================================================
-  // PHYSICAL PAGE CONCEPT
-  // ========================================================
-
-  std::cout << "\n";
-
-  printLine('=');
-
-  std::cout << " PHYSICAL PAGE CONCEPT\n";
-
-  printLine('=');
-
-  std::cout << "\n";
-
-  std::cout << "+----------------------------------------------------------+\n";
-
-  std::cout << "| HEADER                                                   |\n";
-
-  std::cout << "+----------------------------------------------------------+\n";
-
-  std::cout << "| SLOT DIRECTORY                                           |\n";
-
-  std::cout << "| Slots: " << slot_count << "\n";
-
-  std::cout << "+----------------------------------------------------------+\n";
-
-  std::cout << "| FREE SPACE                                               |\n";
-
-  std::cout << "| " << free_space << " bytes available\n";
-
-  std::cout << "+----------------------------------------------------------+\n";
-
-  std::cout << "| TUPLES                                                   |\n";
-
-  std::cout << "| Stored from the end of the page toward the front         |\n";
-
-  std::cout << "+----------------------------------------------------------+\n";
-
-  state.buffer_pool->unpinPage(state.current_page_id, false);
-}
-
-// ============================================================
-// LIST PAGES
-// ============================================================
-
-void listPages(AppState &state) {
-
-  printTitle("KNOWN DATABASE PAGES");
-
-  if (state.known_pages.empty()) {
-
-    std::cout << "\nNo pages created.\n";
-
-    return;
-  }
-
-  std::cout << "\n";
-
-  for (page_id_t page_id : state.known_pages) {
-
-    std::cout << "Page " << page_id;
-
-    if (page_id == state.current_page_id) {
-
-      std::cout << "  <-- CURRENT";
-    }
-
-    std::cout << "\n";
+    bpm.unpinPage(page_id, false);
   }
 }
 
 // ============================================================
-// FLUSH CURRENT PAGE
+// Visualize Buffer Pool
 // ============================================================
 
-void flushCurrentPage(AppState &state) {
-
-  printTitle("FLUSH CURRENT PAGE");
-
-  if (state.current_page_id == INVALID_PAGE_ID) {
-
-    std::cout << "\nNo current page.\n";
-
-    return;
-  }
-
-  bool result = state.buffer_pool->flushPage(state.current_page_id);
-
-  if (result) {
-
-    std::cout << "\n[SUCCESS] Page " << state.current_page_id
-              << " flushed to disk.\n";
-
-  } else {
-
-    std::cout << "\n[ERROR] "
-              << "Could not flush page.\n";
-  }
-}
-
-// ============================================================
-// FLUSH ALL
-// ============================================================
-
-void flushAllPages(AppState &state) {
-
-  printTitle("FLUSH ALL PAGES");
-
-  for (page_id_t page_id : state.known_pages) {
-
-    state.buffer_pool->flushPage(page_id);
-  }
-
-  std::cout << "\n[SUCCESS] "
-            << "All known pages flushed.\n";
-}
-
-// ============================================================
-// BUFFER POOL VISUALIZER
-// ============================================================
-//
-// Requires debug methods:
-//
-// getPoolSize()
-// getFramePageId()
-// getFramePinCount()
-// getFrameDirty()
-//
-// See additions below.
-//
-
-void visualizeBufferPool(AppState &state) {
+void visualizeBufferPool(const BufferPoolManager &bpm,
+                         page_id_t active_page_id) {
 
   printTitle("BUFFER POOL VISUALIZER");
 
+  const size_t pool_size = bpm.getPoolSize();
+
   std::cout << "\n";
 
-  std::cout << "Buffer Pool Size: " << state.buffer_pool->getPoolSize() << "\n";
+  printBorder();
 
-  printLine('=');
+  printRow("BUFFER POOL SIZE = " + std::to_string(pool_size));
 
-  std::cout << std::left << std::setw(10) << "FRAME"
+  printBorder();
 
-            << std::setw(15) << "PAGE ID"
+  std::cout << "\n";
 
-            << std::setw(15) << "PIN COUNT"
+  std::cout << "+--------+------------+------------+----------+------------+\n";
 
-            << std::setw(15) << "DIRTY"
+  std::cout << "| FRAME  "
+            << "| PAGE ID    "
+            << "| PIN COUNT  "
+            << "| DIRTY    "
+            << "| STATUS     |\n";
 
-            << "STATUS\n";
+  std::cout << "+--------+------------+------------+----------+------------+\n";
 
-  printLine('-');
+  for (frame_id_t frame_id = 0; frame_id < static_cast<frame_id_t>(pool_size);
+       ++frame_id) {
 
-  for (frame_id_t frame = 0; frame < state.buffer_pool->getPoolSize();
-       ++frame) {
+    page_id_t page_id = bpm.getFramePageId(frame_id);
 
-    page_id_t page_id = state.buffer_pool->getFramePageId(frame);
+    int pin_count = bpm.getFramePinCount(frame_id);
+
+    bool dirty = bpm.getFrameDirty(frame_id);
+
+    std::string page_text;
+
+    std::string status;
 
     if (page_id == INVALID_PAGE_ID) {
 
-      std::cout << std::left << std::setw(10) << frame
+      page_text = "EMPTY";
 
-                << std::setw(15) << "-"
-
-                << std::setw(15) << "-"
-
-                << std::setw(15) << "-"
-
-                << "FREE\n";
-
-      continue;
-    }
-
-    int pin_count = state.buffer_pool->getFramePinCount(frame);
-
-    bool dirty = state.buffer_pool->getFrameDirty(frame);
-
-    std::cout << std::left << std::setw(10) << frame
-
-              << std::setw(15) << page_id
-
-              << std::setw(15) << pin_count
-
-              << std::setw(15) << (dirty ? "YES" : "NO");
-
-    if (pin_count > 0) {
-
-      std::cout << "PINNED";
+      status = "FREE";
 
     } else {
 
-      std::cout << "EVICTABLE";
+      page_text = std::to_string(page_id);
+
+      if (page_id == active_page_id) {
+
+        status = "ACTIVE PAGE";
+
+      } else if (pin_count > 0) {
+
+        status = "PINNED";
+
+      } else {
+
+        status = "EVICTABLE";
+      }
     }
 
-    std::cout << "\n";
+    std::cout << "| " << std::setw(6) << std::left << frame_id
+
+              << "| " << std::setw(11) << page_text
+
+              << "| " << std::setw(11) << pin_count
+
+              << "| " << std::setw(9) << (dirty ? "YES" : "NO")
+
+              << "| " << std::setw(11) << status
+
+              << "|\n";
   }
 
-  std::cout << "\n";
+  std::cout << "+--------+------------+------------+----------+------------+\n";
 
-  printLine('=');
+  // ----------------------------------------------------------
+  // Summary
+  // ----------------------------------------------------------
 
-  std::cout << "Legend:\n";
+  size_t used_frames = 0;
+  size_t pinned_frames = 0;
+  size_t dirty_frames = 0;
 
-  std::cout << "  PINNED    -> Cannot be evicted\n";
+  for (frame_id_t frame_id = 0; frame_id < static_cast<frame_id_t>(pool_size);
+       ++frame_id) {
 
-  std::cout << "  EVICTABLE -> Can be selected by LRU\n";
+    page_id_t page_id = bpm.getFramePageId(frame_id);
 
-  std::cout << "  FREE      -> Unused frame\n";
+    if (page_id != INVALID_PAGE_ID) {
+      ++used_frames;
+    }
+
+    if (bpm.getFramePinCount(frame_id) > 0) {
+      ++pinned_frames;
+    }
+
+    if (bpm.getFrameDirty(frame_id)) {
+      ++dirty_frames;
+    }
+  }
+
+  std::cout << "\nUsed frames: " << used_frames << " / " << pool_size << "\n";
+
+  std::cout << "Pinned frames: " << pinned_frames << "\n";
+
+  std::cout << "Dirty frames: " << dirty_frames << "\n";
 }
 
 // ============================================================
-// LRU VISUALIZER
+// Visualize LRU Replacer
 // ============================================================
-//
-// Requires:
-//
-// std::vector<frame_id_t> Lrur::getFrames() const;
-//
-// Returned order:
-//
-// oldest -> newest
-//
 
-void visualizeLru(AppState &state) {
+void visualizeLru(const BufferPoolManager &bpm) {
 
   printTitle("LRU REPLACER VISUALIZER");
 
-  const auto &frames = state.buffer_pool->getReplacer().getFrames();
+  const Lrur &replacer = bpm.getReplacer();
+
+  std::vector<frame_id_t> frames = replacer.getFrames();
+
+  std::cout << "\n";
+
+  printBorder();
+
+  printRow("EVICTABLE FRAMES = " + std::to_string(frames.size()));
+
+  printBorder();
 
   if (frames.empty()) {
 
-    std::cout << "\nLRU is empty.\n";
+    std::cout << "\nLRU replacer is empty.\n";
 
-    std::cout << "All cached pages are currently pinned "
-              << "or the buffer pool is empty.\n";
+    std::cout << "No frames are currently evictable.\n";
 
     return;
   }
 
   std::cout << "\n";
 
-  std::cout << "Eviction order:\n\n";
+  std::cout << "LRU ORDER:\n\n";
 
   std::cout << "OLDEST";
 
   for (frame_id_t frame : frames) {
 
-    std::cout << "  --->  "
-              << "[Frame " << frame << "]";
+    std::cout << "  ->  [Frame " << frame << "]";
   }
 
-  std::cout << "  --->  NEWEST\n";
+  std::cout << "  ->  NEWEST\n\n";
 
-  std::cout << "\n";
+  std::cout << "Legend:\n";
 
-  std::cout << "The next victim would be Frame " << frames.front() << "\n";
+  std::cout << "  OLDEST = next likely victim\n";
+
+  std::cout << "  NEWEST = most recently unpinned\n";
 }
 
 // ============================================================
-// FULL STORAGE OVERVIEW
+// Flush active page
 // ============================================================
 
-void storageOverview(AppState &state) {
+void flushActivePage(BufferPoolManager &bpm, page_id_t active_page_id) {
 
-  clearScreen();
+  printTitle("FLUSH ACTIVE PAGE");
 
-  printTitle("WALOUDB STORAGE SYSTEM OVERVIEW");
+  if (!isValidPageId(active_page_id)) {
 
-  std::cout << "\n";
+    std::cout << "\nNo active page.\n";
 
-  std::cout << "DATABASE FILE\n";
+    return;
+  }
 
-  printLine('-');
+  bool success = bpm.flushPage(active_page_id);
 
-  std::cout << "File: " << DATABASE_FILE << "\n";
+  if (success) {
 
-  std::cout << "Known pages: " << state.known_pages.size() << "\n";
-
-  std::cout << "Current page: ";
-
-  if (state.current_page_id == INVALID_PAGE_ID) {
-
-    std::cout << "NONE\n";
+    std::cout << "\n[SUCCESS] Page " << active_page_id << " flushed to disk.\n";
 
   } else {
 
-    std::cout << state.current_page_id << "\n";
+    std::cout << "\n[FAILED] Could not flush page.\n";
+  }
+}
+
+// ============================================================
+// Flush all pages
+// ============================================================
+
+void flushAllPages(BufferPoolManager &bpm) {
+
+  printTitle("FLUSH ALL BUFFER POOL PAGES");
+
+  size_t flushed = 0;
+  size_t failed = 0;
+
+  for (frame_id_t frame_id = 0;
+       frame_id < static_cast<frame_id_t>(bpm.getPoolSize()); ++frame_id) {
+
+    page_id_t page_id = bpm.getFramePageId(frame_id);
+
+    if (page_id == INVALID_PAGE_ID) {
+      continue;
+    }
+
+    bool success = bpm.flushPage(page_id);
+
+    if (success) {
+
+      ++flushed;
+
+      std::cout << "[FLUSHED] Page " << page_id << "\n";
+
+    } else {
+
+      ++failed;
+
+      std::cout << "[FAILED] Page " << page_id << "\n";
+    }
   }
 
   std::cout << "\n";
 
-  visualizeBufferPool(state);
+  printBorder();
 
-  std::cout << "\n";
+  printRow("FLUSH ALL SUMMARY");
 
-  visualizeLru(state);
+  printRow("Successfully flushed = " + std::to_string(flushed));
+
+  printRow("Failed = " + std::to_string(failed));
+
+  printBorder();
 }
 
 // ============================================================
-// MAIN
+// Menu
+// ============================================================
+
+void printMenu(page_id_t active_page_id) {
+
+  printTitle("WALOUDB STORAGE ENGINE");
+
+  if (isValidPageId(active_page_id)) {
+
+    std::cout << "\nACTIVE PAGE: " << active_page_id << "\n";
+
+  } else {
+
+    std::cout << "\nACTIVE PAGE: NONE\n";
+  }
+
+  std::cout << "\n";
+
+  std::cout << "  PAGE MANAGEMENT\n";
+
+  std::cout << "  ------------------------------------------------\n";
+
+  std::cout << "  1. Create new page\n";
+
+  std::cout << "  2. Switch active page\n";
+
+  std::cout << "\n";
+
+  std::cout << "  TUPLE OPERATIONS\n";
+
+  std::cout << "  ------------------------------------------------\n";
+
+  std::cout << "  3. Insert tuple\n";
+
+  std::cout << "  4. Get tuple\n";
+
+  std::cout << "  5. Update tuple\n";
+
+  std::cout << "  6. Delete tuple\n";
+
+  std::cout << "\n";
+
+  std::cout << "  PAGE OPERATIONS\n";
+
+  std::cout << "  ------------------------------------------------\n";
+
+  std::cout << "  7. Compact active page\n";
+
+  std::cout << "  8. Visualize active page\n";
+
+  std::cout << "  9. Visualize all pages\n";
+
+  std::cout << "\n";
+
+  std::cout << "  BUFFER POOL / CACHE\n";
+
+  std::cout << "  ------------------------------------------------\n";
+
+  std::cout << " 10. Visualize Buffer Pool\n";
+
+  std::cout << " 11. Visualize LRU Replacer\n";
+
+  std::cout << "\n";
+
+  std::cout << "  DISK\n";
+
+  std::cout << "  ------------------------------------------------\n";
+
+  std::cout << " 12. Flush page\n";
+
+  std::cout << " 13. Flush all pages\n";
+
+  std::cout << "\n";
+
+  std::cout << "   0. Exit\n";
+
+  std::cout << "\n";
+}
+
+// ============================================================
+// Main
 // ============================================================
 
 int main() {
 
-  // ========================================================
-  // Startup
-  // ========================================================
+  std::cout << "\n";
 
-  AppState state;
+  std::cout << "############################################################\n";
 
-  state.disk = std::make_unique<DiskManager>(DATABASE_FILE);
+  std::cout << "#                                                          #\n";
 
-  state.buffer_pool =
-      std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, state.disk.get());
+  std::cout << "#              WALOUDB STORAGE PLAYGROUND                  #\n";
+
+  std::cout << "#                                                          #\n";
+
+  std::cout << "############################################################\n";
+
+  // ----------------------------------------------------------
+  // Disk Manager
+  // ----------------------------------------------------------
+
+  DiskManager disk_manager(DATABASE_FILE);
+
+  // ----------------------------------------------------------
+  // Buffer Pool Manager
+  // ----------------------------------------------------------
+
+  BufferPoolManager bpm(BUFFER_POOL_SIZE, &disk_manager);
+
+  // ----------------------------------------------------------
+  // Schema
+  // ----------------------------------------------------------
+
+  Schema schema = createSchema();
+
+  // ----------------------------------------------------------
+  // Application state
+  // ----------------------------------------------------------
+
+  page_id_t active_page_id = INVALID_PAGE_ID;
+
+  // Pages created during this session.
+  //
+  // Later we can replace this with a proper database catalog.
+  std::vector<page_id_t> known_pages;
 
   bool running = true;
 
-  // ========================================================
+  // ==========================================================
   // Main loop
-  // ========================================================
+  // ==========================================================
 
   while (running) {
 
-    clearScreen();
+    printMenu(active_page_id);
 
-    printMainMenu(state);
-
-    int choice;
-
-    std::cin >> choice;
-
-    if (!std::cin) {
-
-      clearInput();
-
-      std::cout << "\nInvalid choice.";
-
-      waitForEnter();
-
-      continue;
-    }
-
-    clearInput();
-
-    clearScreen();
+    int choice = readInt("Choose an option: ");
 
     switch (choice) {
 
-      // =================================================
-      // CREATE PAGE
-      // =================================================
+      // ========================================================
+      // 1. Create page
+      // ========================================================
 
     case 1:
 
-      createNewPage(state);
-
-      waitForEnter();
+      createNewPage(bpm, active_page_id, known_pages);
 
       break;
 
-      // =================================================
-      // SWITCH PAGE
-      // =================================================
+      // ========================================================
+      // 2. Switch page
+      // ========================================================
 
     case 2:
 
-      switchPage(state);
-
-      waitForEnter();
+      switchActivePage(active_page_id, known_pages, bpm);
 
       break;
 
-      // =================================================
-      // INSERT
-      // =================================================
+      // ========================================================
+      // 3. Insert
+      // ========================================================
 
     case 3:
 
-      insertTuple(state);
-
-      waitForEnter();
+      insertTuple(bpm, active_page_id, schema);
 
       break;
 
-      // =================================================
-      // DELETE
-      // =================================================
+      // ========================================================
+      // 4. Get tuple
+      // ========================================================
 
     case 4:
 
-      deleteTuple(state);
-
-      waitForEnter();
+      getTuple(bpm, active_page_id, schema);
 
       break;
 
-      // =================================================
-      // PAGE VISUALIZER
-      // =================================================
+      // ========================================================
+      // 5. Update tuple
+      // ========================================================
 
     case 5:
 
-      visualizePage(state);
-
-      waitForEnter();
+      updateTuple(bpm, active_page_id, schema);
 
       break;
 
-      // =================================================
-      // BUFFER POOL
-      // =================================================
+      // ========================================================
+      // 6. Delete tuple
+      // ========================================================
 
     case 6:
 
-      visualizeBufferPool(state);
-
-      waitForEnter();
+      deleteTuple(bpm, active_page_id);
 
       break;
 
-      // =================================================
-      // LRU
-      // =================================================
+      // ========================================================
+      // 7. Compact
+      // ========================================================
 
     case 7:
 
-      visualizeLru(state);
-
-      waitForEnter();
+      compactActivePage(bpm, active_page_id);
 
       break;
 
-      // =================================================
-      // LIST PAGES
-      // =================================================
+      // ========================================================
+      // 8. Visualize active page
+      // ========================================================
 
     case 8:
 
-      listPages(state);
-
-      waitForEnter();
+      visualizeActivePage(bpm, active_page_id, schema);
 
       break;
 
-      // =================================================
-      // FLUSH CURRENT
-      // =================================================
+      // ========================================================
+      // 9. Visualize all pages
+      // ========================================================
 
     case 9:
 
-      flushCurrentPage(state);
-
-      waitForEnter();
+      visualizeAllPages(bpm, known_pages, active_page_id, schema);
 
       break;
 
-      // =================================================
-      // FLUSH ALL
-      // =================================================
+      // ========================================================
+      // 10. Buffer Pool
+      // ========================================================
 
     case 10:
 
-      flushAllPages(state);
-
-      waitForEnter();
+      visualizeBufferPool(bpm, active_page_id);
 
       break;
 
-      // =================================================
-      // OVERVIEW
-      // =================================================
+      // ========================================================
+      // 11. LRU
+      // ========================================================
 
     case 11:
 
-      storageOverview(state);
-
-      waitForEnter();
+      visualizeLru(bpm);
 
       break;
 
-      // =================================================
-      // EXIT
-      // =================================================
+      // ========================================================
+      // 12. Flush active page
+      // ========================================================
+
+    case 12:
+
+      flushActivePage(bpm, active_page_id);
+
+      break;
+
+      // ========================================================
+      // 13. Flush all
+      // ========================================================
+
+    case 13:
+
+      flushAllPages(bpm);
+
+      break;
+
+      // ========================================================
+      // Exit
+      // ========================================================
 
     case 0:
 
-      std::cout << "\nFlushing pages...\n";
+      printTitle("SHUTTING DOWN");
 
-      flushAllPages(state);
+      std::cout << "\nFlushing all pages...\n";
 
-      std::cout << "\nGoodbye from WalouDB.\n";
+      flushAllPages(bpm);
+
+      std::cout << "\nGoodbye.\n";
 
       running = false;
 
       break;
 
-      // =================================================
-      // INVALID
-      // =================================================
+      // ========================================================
+      // Invalid
+      // ========================================================
 
     default:
 
-      std::cout << "\nInvalid choice.\n";
-
-      waitForEnter();
+      std::cout << "\nInvalid option.\n";
 
       break;
     }
   }
 
-  return EXIT_SUCCESS;
+  return 0;
 }
