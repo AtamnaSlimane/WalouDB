@@ -21,10 +21,32 @@ TableHeap::TableHeap(BufferPoolManager *bpm) : m_bpm(bpm) {
   m_last_page_id = page_id;
 }
 bool TableHeap::insertTuple(const Tuple &tuple, RID *out_rid) {
+  // on empty heap handling
+  if (m_last_page_id == INVALID_PAGE_ID) {
+    page_id_t new_page_id;
+    auto new_page = m_bpm->newPage(&new_page_id);
+    if (new_page == nullptr) {
+      return false; // Disk or Buffer Pool exhausted
+    }
+
+    SlottedPage nsp(new_page->getData());
+    nsp.Init(new_page_id);
+
+    if (!nsp.insertTuple(tuple, out_rid)) {
+      m_bpm->unpinPage(new_page_id, false);
+      return false; // Tuple exceeds maximum page capacity
+    }
+
+    m_first_page_id = new_page_id;
+    m_last_page_id = new_page_id;
+    m_bpm->unpinPage(new_page_id, true);
+    return true;
+  }
   auto page = m_bpm->fetchPage(m_last_page_id);
   if (page == nullptr) {
     return false;
   }
+
   auto old_page_id = page->getPageId();
   SlottedPage sp(page->getData());
   if (sp.insertTuple(tuple, out_rid)) {
@@ -38,15 +60,16 @@ bool TableHeap::insertTuple(const Tuple &tuple, RID *out_rid) {
     m_bpm->unpinPage(old_page_id, false);
     return false;
   }
+
   SlottedPage nsp(new_page->getData());
   nsp.Init(new_page_id);
-  sp.setNextPageId(new_page_id);
   if (!nsp.insertTuple(tuple, out_rid)) {
-    m_bpm->unpinPage(old_page_id, true);
+    m_bpm->unpinPage(old_page_id, false);
     m_bpm->unpinPage(new_page_id, false);
     return false;
   }
 
+  sp.setNextPageId(new_page_id);
   m_bpm->unpinPage(old_page_id, true);
   m_bpm->unpinPage(new_page_id, true);
   m_last_page_id = new_page_id;
@@ -76,13 +99,8 @@ bool TableHeap::updateTuple(RID rid, const Tuple &tuple) {
   }
   SlottedPage sp(page->getData());
   bool updated = sp.updateTuple(rid.slot_num, tuple);
-  if (!updated) {
-    m_bpm->unpinPage(rid.page_id, false);
-    return false;
-  }
-
-  m_bpm->unpinPage(rid.page_id, true);
-  return true;
+  m_bpm->unpinPage(rid.page_id, updated);
+  return updated;
 }
 
 bool TableHeap::deleteTuple(RID rid) {
