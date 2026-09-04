@@ -30,10 +30,6 @@ bool SlottedPage::insertTuple(const Tuple &tuple, RID *out_rid) {
     }
   }
 
-  if (freeSpace() < required) {
-    return false;
-  }
-
   h->upper -= tuple_len;
   std::memcpy(m_data + h->upper, tuple.getData(), tuple_len);
   uint16_t slot_idx = h->slot_count;
@@ -55,32 +51,41 @@ bool SlottedPage::insertTuple(const Tuple &tuple, RID *out_rid) {
 bool SlottedPage::updateTuple(uint16_t slot_num, const Tuple &tuple) {
   uint16_t tuple_len = tuple.getLength();
   auto old_tuple = getTuple(slot_num);
-
   if (!old_tuple.has_value()) {
     return false;
   }
+  auto old_len = old_tuple->getLength();
+
   auto slot = getSlot(slot_num);
-  if (tuple_len <= old_tuple->getLength()) {
+  if (tuple_len <= old_len) {
     memcpy(m_data + slot->offset, tuple.getData(), tuple_len);
     slot->length = tuple_len;
     return true;
   }
-  if (tuple_len > freeSpace()) {
+
+  if (tuple_len > freeSpace() + old_len) {
     compact();
-    if (tuple_len > freeSpace()) {
+    slot = getSlot(slot_num);
+    if (tuple_len > freeSpace() + old_len) {
       return false;
     }
-    slot = getSlot(slot_num);
   }
-  auto h = getHeader();
-  if (tuple_len > freeSpace()) {
-    return false;
-  }
-  h->upper -= tuple_len;
-  memcpy(m_data + h->upper, tuple.getData(), tuple_len);
+
+  slot->length = 0;
+  slot->deleted = true;
+  compact();
+
   slot = getSlot(slot_num);
+  auto h = getHeader();
+
+  h->upper -= tuple_len;
+
+  memcpy(m_data + h->upper, tuple.getData(), tuple_len);
+
   slot->offset = h->upper;
   slot->length = tuple_len;
+  slot->deleted = false;
+
   return true;
 }
 

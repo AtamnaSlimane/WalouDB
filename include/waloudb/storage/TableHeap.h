@@ -11,6 +11,7 @@ public:
   TableHeap(BufferPoolManager *bpm);
 
   bool insertTuple(const Tuple &tuple, RID *out_rid);
+  bool updateTuple(RID rid, const Tuple &tuple);
   bool getTuple(RID rid, Tuple *out_tuple) const;
   bool deleteTuple(RID rid);
 

@@ -68,6 +68,23 @@ bool TableHeap::getTuple(RID rid, Tuple *out_tuple) const {
   return true;
 };
 
+bool TableHeap::updateTuple(RID rid, const Tuple &tuple) {
+
+  auto page = m_bpm->fetchPage(rid.page_id);
+  if (page == nullptr) {
+    return false;
+  }
+  SlottedPage sp(page->getData());
+  bool updated = sp.updateTuple(rid.slot_num, tuple);
+  if (!updated) {
+    m_bpm->unpinPage(rid.page_id, false);
+    return false;
+  }
+
+  m_bpm->unpinPage(rid.page_id, true);
+  return true;
+}
+
 bool TableHeap::deleteTuple(RID rid) {
 
   auto page = m_bpm->fetchPage(rid.page_id);
