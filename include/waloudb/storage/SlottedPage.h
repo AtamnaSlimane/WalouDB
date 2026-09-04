@@ -46,7 +46,10 @@ public:
   uint16_t getSlotCount() const { return getHeader()->slot_count; }
   int findReusableSlot(uint16_t required_size) const;
   void compact(); // deal with dead space from deleting/updating tuples
-  page_id_t nextPageId() { return getHeader()->next_page_id; }
+  page_id_t getNextPageId() const { return getHeader()->next_page_id; }
+  void setNextPageId(page_id_t next_page_id) {
+    getHeader()->next_page_id = next_page_id;
+  }
   // debug only
   std::optional<Slot> getSlotInfo(uint16_t idx) const {
     if (idx >= getHeader()->slot_count) {
