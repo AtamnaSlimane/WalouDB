@@ -9,7 +9,8 @@ struct PageHeader {
   page_id_t page_id;
   uint16_t lower; // end of slot array / start of free space
   uint16_t upper; // start of tuple data / end of free space
-  uint16_t slot_count;
+  uint16_t slot_count{0};
+  page_id_t next_page_id{INVALID_PAGE_ID};
 };
 
 struct Slot {
@@ -45,7 +46,7 @@ public:
   uint16_t getSlotCount() const { return getHeader()->slot_count; }
   int findReusableSlot(uint16_t required_size) const;
   void compact(); // deal with dead space from deleting/updating tuples
-
+  page_id_t nextPageId() { return getHeader()->next_page_id; }
   // debug only
   std::optional<Slot> getSlotInfo(uint16_t idx) const {
     if (idx >= getHeader()->slot_count) {

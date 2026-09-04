@@ -10,6 +10,8 @@ void SlottedPage::Init(page_id_t page_id) {
   auto h = getHeader();
 
   h->page_id = page_id;
+
+  h->next_page_id = INVALID_PAGE_ID;
   h->lower = sizeof(PageHeader);
   h->upper = static_cast<uint16_t>(PAGE_SIZE);
   h->slot_count = 0;
