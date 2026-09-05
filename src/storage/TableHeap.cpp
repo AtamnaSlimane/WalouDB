@@ -1,14 +1,15 @@
 #include "waloudb/storage/TableHeap.h"
 #include "waloudb/common/Types.h"
 #include "waloudb/storage/BufferPoolManager.h"
+#include "waloudb/storage/Page.h"
 #include "waloudb/storage/SlottedPage.h"
 #include "waloudb/storage/Tuple.h"
 #include <exception>
 #include <stdexcept>
 
 namespace WalouDB {
-TableHeap::TableHeap(BufferPoolManager *bpm) : m_bpm(bpm) {
 
+TableHeap::TableHeap(BufferPoolManager *bpm) {
   page_id_t page_id;
   auto page = bpm->newPage(&page_id);
   if (page == nullptr) {
@@ -19,6 +20,26 @@ TableHeap::TableHeap(BufferPoolManager *bpm) : m_bpm(bpm) {
   bpm->unpinPage(page_id, true);
   m_first_page_id = page_id;
   m_last_page_id = page_id;
+}
+TableHeap::TableHeap(BufferPoolManager *bpm, page_id_t first_page_id)
+    : m_bpm(bpm), m_first_page_id(first_page_id) {
+
+  page_id_t current = first_page_id;
+  while (true) {
+    Page *page = bpm->fetchPage(current);
+    if (page == nullptr) {
+      throw std::runtime_error("TableHeap: could not fetch page " +
+                               std::to_string(current) +
+                               " while walking existing chain");
+    }
+    SlottedPage sp(page->getData());
+    page_id_t next = sp.getNextPageId();
+    bpm->unpinPage(current, false);
+    if (next == INVALID_PAGE_ID)
+      break;
+    current = next;
+  }
+  m_last_page_id = current;
 }
 bool TableHeap::insertTuple(const Tuple &tuple, RID *out_rid) {
   // on empty heap handling

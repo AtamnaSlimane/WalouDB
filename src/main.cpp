@@ -1,5 +1,6 @@
 #include "waloudb/common/Types.h"
 #include "waloudb/storage/BufferPoolManager.h"
+#include "waloudb/storage/Catalog.h"
 #include "waloudb/storage/DiskManager.h"
 #include "waloudb/storage/Page.h"
 #include "waloudb/storage/Schema.h"
@@ -12,7 +13,6 @@
 #include <iostream>
 #include <limits>
 #include <string>
-#include <unordered_set>
 #include <vector>
 using namespace WalouDB;
 
@@ -23,7 +23,8 @@ constexpr size_t BUFFER_POOL_SIZE = 5;
 const std::string DATABASE_FILE = "waloudb.db";
 
 // ============================================================
-// Schema
+// Schema (used when CREATING a table — existing tables load their
+// schema from the catalog instead, see main())
 // ============================================================
 Schema createSchema() {
   return Schema({
@@ -92,9 +93,8 @@ Page *fetchActivePage(BufferPoolManager &bpm, page_id_t active_page_id) {
     return nullptr;
   }
   Page *page = bpm.fetchPage(active_page_id);
-  if (page == nullptr) {
+  if (page == nullptr)
     std::cout << "\n[FAILED] Could not fetch active page.\n";
-  }
   return page;
 }
 
@@ -105,11 +105,10 @@ void printTupleValues(const Tuple &tuple, const Schema &schema) {
   for (size_t i = 0; i < schema.getColumnCount(); ++i) {
     const Column &column = schema.getColumn(i);
     Value value = tuple.getValue(schema, i);
-    if (column.type == TypeId::INTEGER) {
+    if (column.type == TypeId::INTEGER)
       printRow(column.name + " = " + std::to_string(value.getInteger()));
-    } else if (column.type == TypeId::VARCHAR) {
+    else if (column.type == TypeId::VARCHAR)
       printRow(column.name + " = \"" + value.getString() + "\"");
-    }
   }
 }
 
@@ -123,8 +122,7 @@ void visualizePage(const SlottedPage &page, const Schema &schema) {
   const uint16_t free_space = page.freeSpace();
 
   uint32_t live_tuple_bytes = 0;
-  uint16_t active_slots = 0;
-  uint16_t deleted_slots = 0;
+  uint16_t active_slots = 0, deleted_slots = 0;
   for (uint16_t i = 0; i < slot_count; ++i) {
     auto slot_opt = page.getSlotInfo(i);
     if (!slot_opt.has_value())
@@ -240,7 +238,8 @@ void visualizePage(const SlottedPage &page, const Schema &schema) {
 }
 
 // ============================================================
-// Raw page menu functions (unchanged behavior)
+// Raw page menu functions (unchanged, still handy for poking at
+// arbitrary pages including the catalog's own page 0)
 // ============================================================
 bool createNewPage(BufferPoolManager &bpm, page_id_t &active_page_id,
                    std::vector<page_id_t> &known_pages) {
@@ -269,10 +268,9 @@ void switchActivePage(page_id_t &active_page_id,
     return;
   }
   std::cout << "\nKnown pages:\n\n";
-  for (page_id_t id : known_pages) {
+  for (page_id_t id : known_pages)
     std::cout << "  Page " << id << (id == active_page_id ? "  <-- ACTIVE" : "")
               << "\n";
-  }
   int input = readInt("\nEnter page ID: ");
   if (input < 0) {
     std::cout << "\nInvalid page ID.\n";
@@ -295,8 +293,8 @@ void switchActivePage(page_id_t &active_page_id,
             << ".\n";
 }
 
-bool insertTuple(BufferPoolManager &bpm, page_id_t active_page_id,
-                 const Schema &schema) {
+bool insertTupleRaw(BufferPoolManager &bpm, page_id_t active_page_id,
+                    const Schema &schema) {
   printTitle("INSERT TUPLE (raw page)");
   Page *raw = fetchActivePage(bpm, active_page_id);
   if (raw == nullptr)
@@ -307,80 +305,35 @@ bool insertTuple(BufferPoolManager &bpm, page_id_t active_page_id,
   Tuple tuple =
       Tuple::Serialize({Value(static_cast<int32_t>(id)), Value(name)}, schema);
   RID rid{};
-  std::cout << "\nTuple size: " << tuple.getLength() << " bytes\n";
-  std::cout << "Free space before: " << page.freeSpace() << " bytes\n";
   bool success = page.insertTuple(tuple, &rid);
   bpm.unpinPage(active_page_id, success);
-  if (!success) {
-    std::cout << "\n[FAILED] Not enough space.\n";
-    return false;
-  }
-  std::cout << "\n[SUCCESS] RID = (" << rid.page_id << ", " << rid.slot_num
-            << ")\n";
-  return true;
+  std::cout << (success ? "\n[SUCCESS] RID = (" + std::to_string(rid.page_id) +
+                              ", " + std::to_string(rid.slot_num) + ")\n"
+                        : "\n[FAILED] Not enough space.\n");
+  return success;
 }
 
-void getTuple(BufferPoolManager &bpm, page_id_t active_page_id,
-              const Schema &schema) {
+void getTupleRaw(BufferPoolManager &bpm, page_id_t active_page_id,
+                 const Schema &schema) {
   printTitle("GET TUPLE (raw page)");
   Page *raw = fetchActivePage(bpm, active_page_id);
   if (raw == nullptr)
     return;
   SlottedPage page(raw->getData());
   int input = readInt("Enter slot number: ");
-  if (input < 0) {
-    std::cout << "\nInvalid slot number.\n";
-    bpm.unpinPage(active_page_id, false);
-    return;
+  if (input >= 0) {
+    auto tuple_opt = page.getTuple(static_cast<uint16_t>(input));
+    if (tuple_opt.has_value()) {
+      printBorder();
+      printTupleValues(*tuple_opt, schema);
+      printBorder();
+    } else
+      std::cout << "\nTuple not found or deleted.\n";
   }
-  auto tuple_opt = page.getTuple(static_cast<uint16_t>(input));
-  if (!tuple_opt.has_value()) {
-    std::cout << "\nTuple not found or deleted.\n";
-    bpm.unpinPage(active_page_id, false);
-    return;
-  }
-  printBorder();
-  printRow("TUPLE " + std::to_string(input));
-  printTupleValues(*tuple_opt, schema);
-  printBorder();
   bpm.unpinPage(active_page_id, false);
 }
 
-bool updateTuple(BufferPoolManager &bpm, page_id_t active_page_id,
-                 const Schema &schema) {
-  printTitle("UPDATE TUPLE (raw page)");
-  Page *raw = fetchActivePage(bpm, active_page_id);
-  if (raw == nullptr)
-    return false;
-  SlottedPage page(raw->getData());
-  int input = readInt("Enter slot number: ");
-  if (input < 0) {
-    bpm.unpinPage(active_page_id, false);
-    return false;
-  }
-  uint16_t slot_num = static_cast<uint16_t>(input);
-  auto old_tuple = page.getTuple(slot_num);
-  if (!old_tuple.has_value()) {
-    std::cout << "\n[FAILED] Tuple does not exist or is deleted.\n";
-    bpm.unpinPage(active_page_id, false);
-    return false;
-  }
-  std::cout << "\nCurrent tuple:\n";
-  printBorder();
-  printTupleValues(*old_tuple, schema);
-  printBorder();
-  int id = readInt("New id: ");
-  std::string name = readString("New name: ");
-  Tuple new_tuple =
-      Tuple::Serialize({Value(static_cast<int32_t>(id)), Value(name)}, schema);
-  bool success = page.updateTuple(slot_num, new_tuple);
-  bpm.unpinPage(active_page_id, success);
-  std::cout << (success ? "\n[SUCCESS] Updated.\n"
-                        : "\n[FAILED] Not enough space.\n");
-  return success;
-}
-
-bool deleteTuple(BufferPoolManager &bpm, page_id_t active_page_id) {
+bool deleteTupleRaw(BufferPoolManager &bpm, page_id_t active_page_id) {
   printTitle("DELETE TUPLE (raw page)");
   Page *raw = fetchActivePage(bpm, active_page_id);
   if (raw == nullptr)
@@ -405,7 +358,7 @@ bool compactActivePage(BufferPoolManager &bpm, page_id_t active_page_id) {
   uint16_t after = page.freeSpace();
   bpm.unpinPage(active_page_id, true);
   std::cout << "\n[SUCCESS] Free space: " << before << " -> " << after
-            << " bytes (recovered " << (after - before) << ")\n";
+            << " bytes\n";
   return true;
 }
 
@@ -423,32 +376,6 @@ void visualizeActivePage(BufferPoolManager &bpm, page_id_t active_page_id,
   SlottedPage page(raw->getData());
   visualizePage(page, schema);
   bpm.unpinPage(active_page_id, false);
-}
-
-void visualizeAllPages(BufferPoolManager &bpm,
-                       const std::vector<page_id_t> &known_pages,
-                       page_id_t active_page_id, const Schema &schema) {
-  printTitle("ALL PAGES");
-  if (known_pages.empty()) {
-    std::cout << "\nNo pages created yet.\n";
-    return;
-  }
-  for (page_id_t page_id : known_pages) {
-    std::cout << "\n";
-    printLine('-');
-    std::cout << "PAGE " << page_id
-              << (page_id == active_page_id ? "  <-- ACTIVE" : "") << "\n";
-    printLine('-');
-    Page *raw = bpm.fetchPage(page_id);
-    if (raw == nullptr) {
-      std::cout << "[FAILED] Could not fetch page.\n";
-      continue;
-    }
-    SlottedPage page(raw->getData());
-    std::cout << "Slots: " << page.getSlotCount()
-              << "   Free space: " << page.freeSpace() << " bytes\n";
-    bpm.unpinPage(page_id, false);
-  }
 }
 
 // ============================================================
@@ -472,8 +399,6 @@ void visualizeBufferPool(const BufferPoolManager &bpm,
     std::string status;
     if (page_id == INVALID_PAGE_ID)
       status = "FREE";
-    else if (page_id == active_page_id)
-      status = "ACTIVE PAGE";
     else if (pin_count > 0)
       status = "PINNED";
     else
@@ -500,16 +425,6 @@ void visualizeLru(const BufferPoolManager &bpm) {
   std::cout << "  ->  NEWEST\n";
 }
 
-void flushActivePage(BufferPoolManager &bpm, page_id_t active_page_id) {
-  printTitle("FLUSH ACTIVE PAGE");
-  if (!isValidPageId(active_page_id)) {
-    std::cout << "\nNo active page.\n";
-    return;
-  }
-  std::cout << (bpm.flushPage(active_page_id) ? "\n[SUCCESS] Flushed.\n"
-                                              : "\n[FAILED]\n");
-}
-
 void flushAllPages(BufferPoolManager &bpm) {
   printTitle("FLUSH ALL BUFFER POOL PAGES");
   size_t flushed = 0;
@@ -527,7 +442,8 @@ void flushAllPages(BufferPoolManager &bpm) {
 }
 
 // ============================================================
-// NEW: TableHeap operations
+// TableHeap operations (now operating on whatever table the
+// catalog resolved — no more "table" hardcoded as always-fresh)
 // ============================================================
 bool insertIntoTable(TableHeap &table, const Schema &schema) {
   printTitle("TABLE INSERT");
@@ -537,15 +453,10 @@ bool insertIntoTable(TableHeap &table, const Schema &schema) {
       Tuple::Serialize({Value(static_cast<int32_t>(id)), Value(name)}, schema);
   RID rid{};
   bool success = table.insertTuple(tuple, &rid);
-  if (!success) {
-    std::cout
-        << "\n[FAILED] Insert failed (pool exhausted or allocation failed).\n";
-    return false;
-  }
-  std::cout << "\n[SUCCESS] RID = (" << rid.page_id << ", " << rid.slot_num
-            << ")\n";
-  std::cout << "(TableHeap picked this page automatically.)\n";
-  return true;
+  std::cout << (success ? "\n[SUCCESS] RID = (" + std::to_string(rid.page_id) +
+                              ", " + std::to_string(rid.slot_num) + ")\n"
+                        : "\n[FAILED] Insert failed.\n");
+  return success;
 }
 
 void getFromTable(TableHeap &table, const Schema &schema) {
@@ -598,7 +509,6 @@ void insertDummyRows(TableHeap &table, const Schema &schema) {
     std::cout << "\nInvalid count.\n";
     return;
   }
-
   int inserted = 0;
   std::vector<page_id_t> pages_touched;
   for (int i = 0; i < count; ++i) {
@@ -612,11 +522,9 @@ void insertDummyRows(TableHeap &table, const Schema &schema) {
     }
     ++inserted;
     if (std::find(pages_touched.begin(), pages_touched.end(), rid.page_id) ==
-        pages_touched.end()) {
+        pages_touched.end())
       pages_touched.push_back(rid.page_id);
-    }
   }
-
   std::cout << "\n";
   printBorder();
   printRow("DUMMY INSERT SUMMARY");
@@ -631,16 +539,14 @@ void insertDummyRows(TableHeap &table, const Schema &schema) {
 }
 
 // ============================================================
-// NEW: Table visualizer — walks first_page_id -> next_page_id chain
+// Table visualizer — walks first_page_id -> next_page_id chain
 // ============================================================
 void visualizeTable(BufferPoolManager &bpm, TableHeap &table,
                     const Schema &schema) {
   printTitle("TABLE VISUALIZER (PAGE CHAIN)");
-
   page_id_t current = table.getFirstPageId();
   int page_index = 0;
   uint32_t total_active = 0, total_deleted = 0;
-
   std::cout << "\nFirst page: " << current << "\n";
 
   while (current != INVALID_PAGE_ID) {
@@ -697,13 +603,11 @@ void visualizeTable(BufferPoolManager &bpm, TableHeap &table,
       }
       std::cout << "\n";
     }
-
     page_id_t next = page.getNextPageId();
     bpm.unpinPage(current, false);
     current = next;
     ++page_index;
   }
-
   std::cout << "\n";
   printBorder();
   printRow("TABLE SUMMARY");
@@ -714,14 +618,51 @@ void visualizeTable(BufferPoolManager &bpm, TableHeap &table,
 }
 
 // ============================================================
+// NEW: Catalog visualizer — shows every table the catalog knows
+// about, straight from its in-memory cache (which is itself
+// rebuilt from page 0 on every startup).
+// ============================================================
+void visualizeCatalog(Catalog &catalog,
+                      const std::vector<std::string> &known_table_names) {
+  printTitle("CATALOG VISUALIZER");
+  if (known_table_names.empty()) {
+    std::cout << "\nNo tables registered this session view — try option 21 "
+                 "after creating one.\n";
+  }
+  for (const auto &name : known_table_names) {
+    TableMetadata *meta = catalog.getTable(name);
+    if (meta == nullptr)
+      continue;
+    std::cout << "\n";
+    printLine('-');
+    std::cout << "TABLE \"" << meta->name << "\" (table_id = " << meta->table_id
+              << ")\n";
+    printLine('-');
+    std::cout << "  first_page_id = " << meta->first_page_id << "\n";
+    std::cout << "  columns:\n";
+    for (const auto &col : meta->columns) {
+      std::cout << "    - " << col.name << " : "
+                << (col.type == TypeId::INTEGER ? "INTEGER" : "VARCHAR")
+                << "\n";
+    }
+  }
+  std::cout
+      << "\nThis view is rebuilt from page 0 on every startup — restart\n";
+  std::cout << "the program and re-check this to confirm it's not just session "
+               "state.\n";
+}
+
+// ============================================================
 // Menu
 // ============================================================
-void printMenu(page_id_t active_page_id, page_id_t table_first_page) {
+void printMenu(page_id_t active_page_id, const std::string &current_table,
+               page_id_t table_first_page) {
   printTitle("WALOUDB STORAGE ENGINE");
   std::cout << "\nACTIVE (raw) PAGE: "
             << (isValidPageId(active_page_id) ? std::to_string(active_page_id)
                                               : "NONE")
-            << "   |   TABLE first_page_id: " << table_first_page << "\n";
+            << "   |   CURRENT TABLE: \"" << current_table
+            << "\" (first_page_id=" << table_first_page << ")\n";
 
   std::cout << "\n  RAW PAGE MANAGEMENT\n  "
                "------------------------------------------------\n";
@@ -729,20 +670,20 @@ void printMenu(page_id_t active_page_id, page_id_t table_first_page) {
   std::cout << "  2. Switch active raw page\n";
   std::cout << "  3. Insert tuple into active page (raw)\n";
   std::cout << "  4. Get tuple from active page (raw)\n";
-  std::cout << "  5. Update tuple in active page (raw)\n";
   std::cout << "  6. Delete tuple from active page (raw)\n";
   std::cout << "  7. Compact active page\n";
   std::cout << "  8. Visualize active page\n";
-  std::cout << "  9. Visualize all known raw pages\n";
 
-  std::cout << "\n  TABLE (TableHeap — multi-page, auto-chaining)\n  "
+  std::cout << "\n  TABLE (via Catalog + TableHeap)\n  "
                "------------------------------------------------\n";
-  std::cout << " 14. Insert row into table\n";
-  std::cout << " 15. Get row from table (by RID)\n";
-  std::cout << " 16. Update row in table (by RID)\n";
-  std::cout << " 17. Delete row from table (by RID)\n";
-  std::cout << " 18. Visualize table (walk full page chain)\n";
-  std::cout << " 19. Insert N dummy rows into table\n";
+  std::cout << " 14. Insert row into current table\n";
+  std::cout << " 15. Get row from current table (by RID)\n";
+  std::cout << " 16. Update row in current table (by RID)\n";
+  std::cout << " 17. Delete row from current table (by RID)\n";
+  std::cout << " 18. Visualize current table (page chain)\n";
+  std::cout << " 19. Insert N dummy rows into current table\n";
+  std::cout << " 20. Create/open a table by name\n";
+  std::cout << " 21. Visualize catalog\n";
 
   std::cout << "\n  BUFFER POOL / CACHE\n  "
                "------------------------------------------------\n";
@@ -750,7 +691,6 @@ void printMenu(page_id_t active_page_id, page_id_t table_first_page) {
   std::cout << " 11. Visualize LRU Replacer\n";
 
   std::cout << "\n  DISK\n  ------------------------------------------------\n";
-  std::cout << " 12. Flush active raw page\n";
   std::cout << " 13. Flush all pages\n";
 
   std::cout << "\n   0. Exit\n\n";
@@ -767,21 +707,38 @@ int main() {
 
   DiskManager disk_manager(DATABASE_FILE);
   BufferPoolManager bpm(BUFFER_POOL_SIZE, &disk_manager);
-  Schema schema = createSchema();
+
+  // Catalog MUST be constructed before any other table claims page 0.
+  Catalog catalog(&bpm);
+
+  Schema default_schema = createSchema();
+
+  // Resolve (or create) the default "users" table via the catalog —
+  // this is what actually fixes the reopen problem: first_page_id now
+  // comes from disk truth (catalog page 0), not a fresh allocation.
+  std::string current_table_name = "users";
+  TableMetadata *meta = catalog.getTable(current_table_name);
+  if (meta == nullptr) {
+    meta = catalog.createTable(current_table_name, default_schema);
+    std::cout << "\nCreated new table \"" << current_table_name
+              << "\". first_page_id = " << meta->first_page_id << "\n";
+  } else {
+    std::cout << "\nReopened existing table \"" << current_table_name
+              << "\". first_page_id = " << meta->first_page_id << "\n";
+  }
+
+  TableHeap table(&bpm, meta->first_page_id); // reopen constructor — walks the
+                                              // chain to find last page
+  Schema schema = default_schema; // for "users" specifically; see option 20 for
+                                  // other tables
 
   page_id_t active_page_id = INVALID_PAGE_ID;
   std::vector<page_id_t> known_pages;
-
-  // NOTE: TableHeap's current constructor always allocates a fresh
-  // first page — it can't yet reopen an existing table across runs
-  // (that needs a catalog, not built yet). Fine for this playground.
-  TableHeap table(&bpm);
-  std::cout << "\nCreated table. first_page_id = " << table.getFirstPageId()
-            << "\n";
+  std::vector<std::string> known_table_names{current_table_name};
 
   bool running = true;
   while (running) {
-    printMenu(active_page_id, table.getFirstPageId());
+    printMenu(active_page_id, current_table_name, table.getFirstPageId());
     int choice = readInt("Choose an option: ");
 
     switch (choice) {
@@ -792,16 +749,13 @@ int main() {
       switchActivePage(active_page_id, known_pages, bpm);
       break;
     case 3:
-      insertTuple(bpm, active_page_id, schema);
+      insertTupleRaw(bpm, active_page_id, schema);
       break;
     case 4:
-      getTuple(bpm, active_page_id, schema);
-      break;
-    case 5:
-      updateTuple(bpm, active_page_id, schema);
+      getTupleRaw(bpm, active_page_id, schema);
       break;
     case 6:
-      deleteTuple(bpm, active_page_id);
+      deleteTupleRaw(bpm, active_page_id);
       break;
     case 7:
       compactActivePage(bpm, active_page_id);
@@ -809,18 +763,12 @@ int main() {
     case 8:
       visualizeActivePage(bpm, active_page_id, schema);
       break;
-    case 9:
-      visualizeAllPages(bpm, known_pages, active_page_id, schema);
-      break;
 
     case 10:
       visualizeBufferPool(bpm, active_page_id);
       break;
     case 11:
       visualizeLru(bpm);
-      break;
-    case 12:
-      flushActivePage(bpm, active_page_id);
       break;
     case 13:
       flushAllPages(bpm);
@@ -843,6 +791,34 @@ int main() {
       break;
     case 19:
       insertDummyRows(table, schema);
+      break;
+
+    case 20: {
+      printTitle("CREATE/OPEN TABLE BY NAME");
+      std::string name = readString("Table name: ");
+      TableMetadata *m = catalog.getTable(name);
+      if (m == nullptr) {
+        // NOTE: for simplicity this playground always uses the same
+        // default_schema for any newly created table. A real system
+        // would prompt for columns here.
+        m = catalog.createTable(name, default_schema);
+        if (m == nullptr) {
+          std::cout << "\n[FAILED] Could not create table.\n";
+          break;
+        }
+        std::cout << "\n[SUCCESS] Created table \"" << name << "\".\n";
+      } else {
+        std::cout << "\n[SUCCESS] Found existing table \"" << name << "\".\n";
+      }
+      current_table_name = name;
+      if (std::find(known_table_names.begin(), known_table_names.end(), name) ==
+          known_table_names.end())
+        known_table_names.push_back(name);
+      table = TableHeap(&bpm, m->first_page_id); // switch the active TableHeap
+      break;
+    }
+    case 21:
+      visualizeCatalog(catalog, known_table_names);
       break;
 
     case 0:
