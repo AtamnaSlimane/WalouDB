@@ -16,6 +16,14 @@ struct TableMetadata {
   std::vector<Column> columns;
   page_id_t first_page_id;
 };
+
+struct IndexMetadata {
+  uint32_t index_id;
+  std::string name;
+  std::string table_name;
+  page_id_t root_page_id;
+};
+
 class Catalog {
 public:
   explicit Catalog(BufferPoolManager *bpm);
