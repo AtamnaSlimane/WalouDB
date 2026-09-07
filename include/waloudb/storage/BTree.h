@@ -28,9 +28,9 @@ struct Node {
   std::vector<Entry> entries;
   uint16_t capacity{0};
 };
-class BPlusTree {
+class BTree {
 public:
-  BPlusTree(BufferPoolManager *bpm);
+  BTree(BufferPoolManager *bpm);
   // bool insert(uint32_t key, RID rid);
   // bool remove(uint32_t key);
   // bool getValue(uint32_t key, RID *rid);
