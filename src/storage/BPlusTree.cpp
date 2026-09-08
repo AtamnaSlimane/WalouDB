@@ -9,6 +9,10 @@ namespace WalouDB {
 BPlusTree::BPlusTree(BufferPoolManager *bpm) : m_bpm(bpm) {
   page_id_t root_page_id;
   Page *page = bpm->newPage(&root_page_id);
+  if (page == nullptr) {
+    m_root_page_id = INVALID_PAGE_ID;
+    return;
+  }
   LeafNode root(page->getData());
   root.Init(root_page_id, INVALID_PAGE_ID);
   bpm->unpinPage(root_page_id, true);
@@ -33,10 +37,18 @@ bool BPlusTree::Search(uint32_t key, RID *out_rid) const {
       return found;
     } else if (h->page_type == NodeType::INTERNAL) {
       InternalNode internal(page->getData());
-      page_id_t next_id = internal.findLeaf(key);
+      page_id_t next_id = internal.findChild(key);
+
       m_bpm->unpinPage(current_id, false);
+
+      if (next_id == INVALID_PAGE_ID) {
+        return false;
+      }
+
       current_id = next_id;
+
     } else {
+      m_bpm->unpinPage(current_id, false);
       return false;
     }
   }

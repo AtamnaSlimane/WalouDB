@@ -37,7 +37,7 @@ public:
   };
   bool findEntry(uint32_t key, RID *out_rid) {
     int idx = findKeyIndex(key);
-    if (idx >= 0 && getEntry(idx)->key == key) {
+    if (idx < getKeyCount() && getEntry(idx)->key == key) {
       *out_rid = getEntry(idx)->rid;
       return true;
     }
@@ -108,8 +108,8 @@ public:
     h->page_type = NodeType::INTERNAL;
     h->key_count = 0;
   }
-  page_id_t findLeaf(uint32_t key) {
-    auto index = findFirstGreater(key);
+  page_id_t findChild(uint32_t key) {
+    auto index = findChildIndex(key);
     return *getChild(index);
   }
 
@@ -130,7 +130,7 @@ private:
     return reinterpret_cast<const NodeHeader *>(m_data);
   }
 
-  InternalHeader *getInternallHeader() {
+  InternalHeader *getInternalHeader() {
     return reinterpret_cast<InternalHeader *>(m_data);
   }
   const InternalHeader *getInternalHeader() const {
@@ -157,7 +157,7 @@ private:
     return reinterpret_cast<page_id_t *>(data);
   }
 
-  int findFirstGreater(uint32_t key) {
+  int findChildIndex(uint32_t key) {
 
     int left = 0, right = getHeader()->key_count;
     while (left < right) {
