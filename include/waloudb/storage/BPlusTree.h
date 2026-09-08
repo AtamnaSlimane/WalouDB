@@ -181,7 +181,8 @@ class BPlusTree {
 public:
   explicit BPlusTree(BufferPoolManager *bpm);
   BPlusTree(BufferPoolManager *bpm, page_id_t root_page_id);
-  // bool remove(uint32_t key);
+  bool Search(uint32_t key, RID *out_rid) const;
+  page_id_t getRootId() { return m_root_page_id; }
   // bool getValue(uint32_t key, RID *rid);
 
 private:
