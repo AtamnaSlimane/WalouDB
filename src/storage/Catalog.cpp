@@ -3,6 +3,7 @@
 #include "waloudb/storage/Value.h"
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 
 namespace WalouDB {
@@ -82,34 +83,47 @@ std::vector<Column> Catalog::decodeColumns(const std::string &blob) {
 // never assumed, always recomputed.
 // ============================================================
 Catalog::Catalog(BufferPoolManager *bpm) : m_bpm(bpm) {
+  std::cout << "[Catalog] before fetchPage(0)\n";
+
   Page *probe = bpm->fetchPage(CATALOG_PAGE_ID);
-  bool needs_init = true;
+
+  std::cout << "[Catalog] after fetchPage(0)\n";
 
   if (probe != nullptr) {
-    SlottedPage sp(probe->getData());
-    needs_init = (sp.getLower() == 0);
+    std::cout << "[Catalog] page 0 exists\n";
     bpm->unpinPage(CATALOG_PAGE_ID, false);
-  }
+  } else {
+    std::cout << "[Catalog] page 0 does not exist\n";
 
-  if (needs_init) {
     page_id_t allocated;
     Page *page = bpm->newPage(&allocated);
+
+    std::cout << "[Catalog] newPage returned: " << allocated << "\n";
+
     if (page == nullptr) {
-      throw std::runtime_error(
-          "Catalog: could not allocate page 0 — buffer pool exhausted");
+      throw std::runtime_error("Catalog: could not allocate catalog page");
     }
+
     if (allocated != CATALOG_PAGE_ID) {
-      throw std::runtime_error(
-          "Catalog: page 0 was already claimed by something else — "
-          "Catalog must be constructed before any TableHeap.");
+      throw std::runtime_error("Catalog: expected page 0, got " +
+                               std::to_string(allocated));
     }
+
     SlottedPage sp(page->getData());
     sp.Init(CATALOG_PAGE_ID);
+
     bpm->unpinPage(CATALOG_PAGE_ID, true);
   }
 
+  std::cout << "[Catalog] creating catalog heap\n";
+
   m_catalog_heap = std::make_unique<TableHeap>(bpm, CATALOG_PAGE_ID);
+
+  std::cout << "[Catalog] loading catalog\n";
+
   loadFromDisk();
+
+  std::cout << "[Catalog] done\n";
 }
 
 void Catalog::loadFromDisk() {

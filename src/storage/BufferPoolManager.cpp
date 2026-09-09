@@ -5,6 +5,7 @@
 #include "waloudb/storage/Page.h"
 #include <algorithm>
 #include <cassert>
+#include <iostream>
 #include <memory>
 #include <mutex>
 
@@ -34,8 +35,12 @@ Page *BufferPoolManager::fetchPage(page_id_t page_id) {
   }
 
   Page &page = m_pages[frame_id];
-  page.resetMemory();
-  m_diskmanager->readPage(page_id, page.getData());
+
+  if (!m_diskmanager->readPage(page_id, page.getData())) {
+    page.resetMemory();
+    m_free_list.push_front(frame_id);
+    return nullptr;
+  }
   page.setPageId(page_id);
   page.pin();
   m_pages_table[page_id] = frame_id;
@@ -126,5 +131,29 @@ bool BufferPoolManager::deletePage(page_id_t page_id) {
   page.resetMemory();
   m_free_list.push_back(frame_id);
   return true;
+}
+
+bool BufferPoolManager::flushAllPages() {
+  std::lock_guard<std::mutex> guard(m_latch);
+
+  bool success = true;
+  size_t flushed = 0;
+
+  for (auto &[page_id, frame_id] : m_pages_table) {
+    Page &page = m_pages[frame_id];
+
+    if (!page.isDirty()) {
+      continue;
+    }
+
+    if (!m_diskmanager->writePage(page_id, page.getData())) {
+      success = false;
+      continue;
+    }
+
+    page.setDirty(false);
+  }
+
+  return success;
 }
 } // namespace WalouDB

@@ -297,6 +297,9 @@ public:
   page_id_t getId() { return getHeader()->page_id; }
   page_id_t getParentId() { return getHeader()->parent_page_id; }
   uint16_t getKeyCount() { return getHeader()->key_count; }
+  void setParentId(page_id_t parent_page_id) {
+    getHeader()->parent_page_id = parent_page_id;
+  }
   bool insertChild(uint32_t key, page_id_t child_id) {
     if (isFull()) {
       return false;
@@ -414,7 +417,7 @@ public:
 
   bool search(uint32_t key, RID *out_rid) const;
   bool insert(uint32_t key, RID rid);
-  bool split(page_id_t page_id, Entry &entry);
+  bool split(page_id_t page_id, Entry &entry, page_id_t right_child_id);
 
   page_id_t getRootId() { return m_root_page_id; }
   // bool getValue(uint32_t key, RID *rid);

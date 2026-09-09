@@ -20,6 +20,7 @@ public:
   bool unpinPage(page_id_t page_id, bool is_dirty);
   bool flushPage(page_id_t page_id);
   bool deletePage(page_id_t page_id);
+  bool flushAllPages();
 
   size_t getPoolSize() const { return m_pool_size; }
   page_id_t getFramePageId(frame_id_t frame_id) const {

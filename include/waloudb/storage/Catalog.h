@@ -32,6 +32,13 @@ public:
 
   const TableMetadata *createTable(const std::string &table_name) const;
 
+  IndexMetadata *createIndex(const std::string &index_name,
+                             const std::string &table_name,
+                             page_id_t root_page_id);
+
+  IndexMetadata *getIndex(const std::string &index_name);
+  bool updateIndexRoot(const std::string &index_name, page_id_t root_page_id);
+
   bool dropTable(const std::string &table_name);
   bool hasTable(std::string &table_name);
   TableMetadata *getTable(const std::string &name);
@@ -49,6 +56,7 @@ private:
   std::unique_ptr<TableHeap> m_catalog_heap;
 
   std::unordered_map<std::string, TableMetadata> m_tables;
+  std::unordered_map<std::string, IndexMetadata> m_indexes;
 
   page_id_t m_next_table_id{0};
 };

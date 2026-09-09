@@ -37,6 +37,12 @@ TableHeap::TableHeap(BufferPoolManager *bpm, page_id_t first_page_id)
     bpm->unpinPage(current, false);
     if (next == INVALID_PAGE_ID)
       break;
+
+    if (next == current) {
+      throw std::runtime_error("TableHeap: page " + std::to_string(current) +
+                               " points to itself");
+    }
+
     current = next;
   }
   m_last_page_id = current;
