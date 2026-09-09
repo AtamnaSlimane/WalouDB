@@ -90,6 +90,9 @@ public:
   page_id_t getId() { return getHeader()->page_id; }
   page_id_t getParentId() { return getHeader()->parent_page_id; }
   uint16_t getKeyCount() { return getHeader()->key_count; }
+  void setParentId(page_id_t parent_id) {
+    getHeader()->parent_page_id = parent_id;
+  }
 
   std::vector<Entry> getAllEntries() {
     std::vector<Entry> output;
@@ -108,6 +111,25 @@ public:
       *getEntry(static_cast<int>(i)) = entries[i];
     }
     getHeader()->key_count = static_cast<uint16_t>(entries.size());
+    return true;
+  }
+
+  bool insertEntry(const Entry &entry) {
+    if (isFull()) {
+      return false;
+    }
+    int idx = findKeyIndex(entry.key);
+    int count = getKeyCount();
+
+    if (idx < count && getEntry(idx)->key == entry.key) {
+      return false; // dupelicate key
+    }
+
+    for (int i = count; i > idx; i--) {
+      *getEntry(i) = *getEntry(i - 1);
+    }
+    *getEntry(idx) = entry;
+    getHeader()->key_count++;
     return true;
   }
 
@@ -275,7 +297,39 @@ public:
   page_id_t getId() { return getHeader()->page_id; }
   page_id_t getParentId() { return getHeader()->parent_page_id; }
   uint16_t getKeyCount() { return getHeader()->key_count; }
+  bool insertChild(uint32_t key, page_id_t child_id) {
+    if (isFull()) {
+      return false;
+    }
+    int n = getKeyCount();
+    int idx = findKeyIndex(key);
+    for (int i = n; i > idx; i--) {
+      *getKey(i) = *getKey(i - 1);
+    }
+    for (int i = n + 1; i > idx + 1; i--) {
+      *getChild(i) = *getChild(i - 1);
+    }
+    *getKey(idx) = key;
+    *getChild(idx + 1) = child_id;
 
+    getHeader()->key_count++;
+
+    return true;
+  }
+
+  int findKeyIndex(uint32_t key) {
+    int left = 0;
+    int right = getHeader()->key_count;
+    while (left < right) {
+      int mid = (left + right) / 2;
+      if (*getKey(mid) < key) {
+        left = mid + 1;
+      } else {
+        right = mid;
+      }
+    }
+    return left;
+  }
   void getAllChildrenKeys(std::vector<page_id_t> *children,
                           std::vector<uint32_t> *keys) {
     int n = getKeyCount();
@@ -289,8 +343,8 @@ public:
     for (int i = 0; i <= n; i++) // n+1
       children->push_back(*getChild(i));
   }
-  bool setAllChildrenKeys(std::vector<page_id_t> &children,
-                          std::vector<uint32_t> &keys) {
+  bool setAllChildrenKeys(const std::vector<page_id_t> &children,
+                          const std::vector<uint32_t> &keys) {
 
     if (children.size() != keys.size() + 1) {
       return false;
@@ -347,7 +401,7 @@ private:
     return left;
   }
 
-  int maxKeys() {
+  static constexpr size_t maxKeys() {
     return (PAGE_SIZE - sizeof(NodeHeader) - sizeof(page_id_t)) /
            (sizeof(uint32_t) + sizeof(page_id_t));
   }
@@ -358,7 +412,9 @@ public:
   explicit BPlusTree(BufferPoolManager *bpm);
   BPlusTree(BufferPoolManager *bpm, page_id_t root_page_id);
 
-  bool Search(uint32_t key, RID *out_rid) const;
+  bool search(uint32_t key, RID *out_rid) const;
+  bool insert(uint32_t key, RID rid);
+  bool split(page_id_t page_id, Entry &entry);
 
   page_id_t getRootId() { return m_root_page_id; }
   // bool getValue(uint32_t key, RID *rid);
