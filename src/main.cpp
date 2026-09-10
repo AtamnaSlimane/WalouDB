@@ -553,6 +553,8 @@ void insertDummyRows(TableHeap &table, const Schema &schema,
     return;
   }
 
+  auto start = std::chrono::steady_clock::now();
+
   int inserted = 0;
 
   for (int i = 0; i < count; ++i) {
@@ -581,16 +583,25 @@ void insertDummyRows(TableHeap &table, const Schema &schema,
     }
 
     if (!primary_index.insert(static_cast<uint32_t>(id), rid)) {
-
       std::cout << "[FAILED] Index insertion failed for ID " << id << '\n';
-
       continue;
     }
 
     ++inserted;
   }
 
+  auto end = std::chrono::steady_clock::now();
+
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
   std::cout << "\nInserted: " << inserted << " rows.\n";
+  std::cout << "Time: " << elapsed.count() << " µs\n";
+  std::cout << "Time: " << elapsed.count() / 1000.0 << " ms\n";
+  std::cout << "Average: "
+            << (inserted ? elapsed.count() / static_cast<double>(inserted)
+                         : 0.0)
+            << " µs/row\n";
 }
 
 void visualizeTable(TableHeap &table, const Schema &schema) {

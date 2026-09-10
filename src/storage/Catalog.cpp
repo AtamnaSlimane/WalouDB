@@ -83,22 +83,15 @@ std::vector<Column> Catalog::decodeColumns(const std::string &blob) {
 // never assumed, always recomputed.
 // ============================================================
 Catalog::Catalog(BufferPoolManager *bpm) : m_bpm(bpm) {
-  std::cout << "[Catalog] before fetchPage(0)\n";
 
   Page *probe = bpm->fetchPage(CATALOG_PAGE_ID);
 
-  std::cout << "[Catalog] after fetchPage(0)\n";
-
   if (probe != nullptr) {
-    std::cout << "[Catalog] page 0 exists\n";
     bpm->unpinPage(CATALOG_PAGE_ID, false);
   } else {
-    std::cout << "[Catalog] page 0 does not exist\n";
 
     page_id_t allocated;
     Page *page = bpm->newPage(&allocated);
-
-    std::cout << "[Catalog] newPage returned: " << allocated << "\n";
 
     if (page == nullptr) {
       throw std::runtime_error("Catalog: could not allocate catalog page");
@@ -115,15 +108,9 @@ Catalog::Catalog(BufferPoolManager *bpm) : m_bpm(bpm) {
     bpm->unpinPage(CATALOG_PAGE_ID, true);
   }
 
-  std::cout << "[Catalog] creating catalog heap\n";
-
   m_catalog_heap = std::make_unique<TableHeap>(bpm, CATALOG_PAGE_ID);
 
-  std::cout << "[Catalog] loading catalog\n";
-
   loadFromDisk();
-
-  std::cout << "[Catalog] done\n";
 }
 
 void Catalog::loadFromDisk() {
