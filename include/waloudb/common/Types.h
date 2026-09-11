@@ -7,5 +7,6 @@ static constexpr size_t PAGE_SIZE = 4096;
 using page_id_t = int32_t;   // disk
 using frame_id_t = uint32_t; // ram
 static constexpr page_id_t INVALID_PAGE_ID = -1;
-
+static constexpr page_id_t CATALOG_PAGE_ID = 0;
+static constexpr page_id_t INDEX_CATALOG_PAGE_ID = 1;
 } // namespace WalouDB

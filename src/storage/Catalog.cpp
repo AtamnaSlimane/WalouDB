@@ -1,4 +1,5 @@
 #include "waloudb/storage/Catalog.h"
+#include "waloudb/common/Types.h"
 #include "waloudb/storage/Tuple.h"
 #include "waloudb/storage/Value.h"
 #include <algorithm>
@@ -13,7 +14,7 @@ namespace WalouDB {
 // schema. Every catalog row looks like this, regardless of what
 // tables it describes.
 // ============================================================
-Schema Catalog::catalogSchema() {
+Schema Catalog::catalogTableSchema() {
   return Schema({
       {"table_id", TypeId::INTEGER},
       {"name", TypeId::VARCHAR},
@@ -22,7 +23,14 @@ Schema Catalog::catalogSchema() {
        TypeId::VARCHAR}, // manually packed column list, see below
   });
 }
-
+Schema Catalog::catalogIndexSchema() {
+  return Schema({
+      {"index_id", TypeId::INTEGER},
+      {"name", TypeId::VARCHAR},
+      {"table_name", TypeId::VARCHAR},
+      {"root_page_id", TypeId::INTEGER},
+  });
+}
 // ============================================================
 // Column list <-> blob encoding
 //
@@ -107,19 +115,40 @@ Catalog::Catalog(BufferPoolManager *bpm) : m_bpm(bpm) {
 
     bpm->unpinPage(CATALOG_PAGE_ID, true);
   }
+  Page *index_catalog_page = bpm->fetchPage(INDEX_CATALOG_PAGE_ID);
 
-  m_catalog_heap = std::make_unique<TableHeap>(bpm, CATALOG_PAGE_ID);
+  if (index_catalog_page != nullptr) {
+    bpm->unpinPage(INDEX_CATALOG_PAGE_ID, false);
+  } else {
+    page_id_t allocated;
+    Page *page = bpm->newPage(&allocated);
+
+    if (page == nullptr || allocated != INDEX_CATALOG_PAGE_ID) {
+      throw std::runtime_error("Catalog: could not create index catalog page");
+    }
+
+    SlottedPage sp(page->getData());
+    sp.Init(INDEX_CATALOG_PAGE_ID);
+
+    bpm->unpinPage(INDEX_CATALOG_PAGE_ID, true);
+  }
+  m_catalog_table_heap = std::make_unique<TableHeap>(bpm, CATALOG_PAGE_ID);
+  m_catalog_index_heap =
+      std::make_unique<TableHeap>(bpm, INDEX_CATALOG_PAGE_ID);
 
   loadFromDisk();
 }
 
 void Catalog::loadFromDisk() {
   m_tables.clear();
+  m_indexes.clear();
   m_next_table_id = 0;
+  m_next_index_id = 0;
 
-  for (auto it = m_catalog_heap->begin(); it != m_catalog_heap->end(); ++it) {
+  for (auto it = m_catalog_table_heap->begin();
+       it != m_catalog_table_heap->end(); ++it) {
     Tuple row = *it;
-    Schema schema = catalogSchema();
+    Schema schema = catalogTableSchema();
 
     TableMetadata meta;
     meta.table_id = static_cast<uint32_t>(row.getValue(schema, 0).getInteger());
@@ -130,10 +159,29 @@ void Catalog::loadFromDisk() {
     m_tables[meta.name] = meta;
     m_next_table_id = std::max<uint32_t>(m_next_table_id, meta.table_id + 1);
   }
+  for (auto it = m_catalog_index_heap->begin();
+       it != m_catalog_index_heap->end(); ++it) {
+    Tuple row = *it;
+    Schema schema = catalogIndexSchema();
+
+    IndexMetadata meta;
+
+    meta.index_id = static_cast<uint32_t>(row.getValue(schema, 0).getInteger());
+
+    meta.name = row.getValue(schema, 1).getString();
+
+    meta.table_name = row.getValue(schema, 2).getString();
+
+    meta.root_page_id = row.getValue(schema, 3).getInteger();
+
+    m_indexes[meta.name] = meta;
+
+    m_next_index_id = std::max<uint32_t>(m_next_index_id, meta.index_id + 1);
+  }
 }
 
 void Catalog::persistEntry(const TableMetadata &meta) {
-  Schema schema = catalogSchema();
+  Schema schema = catalogTableSchema();
   std::string blob = encodeColumns(meta.columns);
 
   Tuple row = Tuple::Serialize(
@@ -146,7 +194,7 @@ void Catalog::persistEntry(const TableMetadata &meta) {
       schema);
 
   RID rid;
-  bool ok = m_catalog_heap->insertTuple(row, &rid);
+  bool ok = m_catalog_table_heap->insertTuple(row, &rid);
   if (!ok) {
     throw std::runtime_error("Catalog: failed to persist entry for table '" +
                              meta.name + "'");
@@ -188,7 +236,50 @@ TableMetadata *Catalog::getTable(const std::string &name) {
     return nullptr;
   return &it->second;
 }
+// indexes
+IndexMetadata *Catalog::createIndex(const std::string &index_name,
+                                    const std::string &table_name,
+                                    page_id_t root_page_id) {
+  if (m_indexes.count(index_name)) {
+    return nullptr;
+  }
+  IndexMetadata meta;
+  meta.root_page_id = root_page_id;
+  meta.table_name = table_name;
+  meta.index_id = m_next_index_id++;
+  meta.name = index_name;
+  persistIndex(meta);
+  auto [it, inserted] = m_indexes.emplace(index_name, std::move(meta));
+  return &it->second;
+}
 
+void Catalog::persistIndex(const IndexMetadata &meta) {
+  Schema schema = catalogIndexSchema();
+
+  Tuple row = Tuple::Serialize(
+      {
+          Value(static_cast<int32_t>(meta.index_id)),
+          Value(meta.name),
+          Value(meta.table_name),
+          Value(static_cast<int32_t>(meta.root_page_id)),
+      },
+      schema);
+
+  RID rid;
+  bool ok = m_catalog_index_heap->insertTuple(row, &rid);
+  if (!ok) {
+    throw std::runtime_error("Catalog: failed to persist entry for index '" +
+                             meta.name + "'");
+  }
+};
+
+IndexMetadata *Catalog::getIndex(const std::string &index_name) {
+  auto it = m_indexes.find(index_name);
+  if (it == m_indexes.end()) {
+    return nullptr;
+  }
+  return &it->second;
+};
 // ============================================================
 // dropTable — NOTE: this only removes the catalog's *record* of
 // the table. It does NOT reclaim the table's own pages (no
@@ -203,5 +294,47 @@ TableMetadata *Catalog::getTable(const std::string &name) {
 bool Catalog::dropTable(const std::string &name) {
   return m_tables.erase(name) > 0;
 }
+bool Catalog::updateIndexRoot(const std::string &index_name,
+                              page_id_t root_page_id) {
+  auto it = m_indexes.find(index_name);
 
+  if (it == m_indexes.end()) {
+    return false;
+  }
+
+  Schema schema = catalogIndexSchema();
+
+  for (auto catalog_it = m_catalog_index_heap->begin();
+       catalog_it != m_catalog_index_heap->end(); ++catalog_it) {
+
+    Tuple row = *catalog_it;
+
+    std::string name = row.getValue(schema, 1).getString();
+
+    if (name != index_name) {
+      continue;
+    }
+
+    Tuple updated = Tuple::Serialize(
+        {
+            Value(static_cast<int32_t>(it->second.index_id)),
+            Value(it->second.name),
+            Value(it->second.table_name),
+            Value(static_cast<int32_t>(root_page_id)),
+        },
+        schema);
+
+    RID rid = catalog_it.getRID();
+
+    if (!m_catalog_index_heap->updateTuple(rid, updated)) {
+      return false;
+    }
+
+    it->second.root_page_id = root_page_id;
+
+    return true;
+  }
+
+  return false;
+}
 } // namespace WalouDB

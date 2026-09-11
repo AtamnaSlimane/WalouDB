@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <vector>
 namespace WalouDB {
@@ -422,9 +423,16 @@ public:
   page_id_t getRootId() { return m_root_page_id; }
   // bool getValue(uint32_t key, RID *rid);
 
+  using RootChangeCallback = std::function<void(page_id_t)>;
+  void setRootChangeCallback(RootChangeCallback callback);
+
 private:
   BufferPoolManager *m_bpm;
-  page_id_t m_root_page_id;
+  page_id_t m_root_page_id{INVALID_PAGE_ID};
+
+  RootChangeCallback m_root_change_callback;
+
+  void setRootPageId(page_id_t root_page_id);
 };
 
 } // namespace WalouDB

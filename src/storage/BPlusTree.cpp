@@ -200,14 +200,13 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
 
       right_leaf.setParentId(new_root_id);
 
-      m_root_page_id = new_root_id;
-
       m_bpm->unpinPage(new_root_id, true);
 
       m_bpm->unpinPage(new_leaf_id, true);
 
       m_bpm->unpinPage(page_id, true);
 
+      setRootPageId(new_root_id);
       return true;
     }
 
@@ -384,14 +383,13 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
 
       right_node.setParentId(new_root_id);
 
-      m_root_page_id = new_root_id;
-
       m_bpm->unpinPage(new_root_id, true);
 
       m_bpm->unpinPage(new_internal_id, true);
 
       m_bpm->unpinPage(page_id, true);
 
+      setRootPageId(new_root_id);
       return true;
     }
 
@@ -419,10 +417,18 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
   // ============================================================
   // INVALID NODE TYPE
   // ============================================================
-
   m_bpm->unpinPage(page_id, false);
 
   return false;
 }
+void BPlusTree::setRootChangeCallback(RootChangeCallback callback) {
+  m_root_change_callback = std::move(callback);
+}
+void BPlusTree::setRootPageId(page_id_t root_page_id) {
+  m_root_page_id = root_page_id;
 
+  if (m_root_change_callback) {
+    m_root_change_callback(root_page_id);
+  }
+}
 } // namespace WalouDB

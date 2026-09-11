@@ -940,11 +940,31 @@ int main() {
   // Current implementation creates a fresh B+Tree root.
   // Existing table rows are therefore indexed at startup.
   // ----------------------------------------------------------
+  IndexMetadata *index_meta = catalog.getIndex("users_pk");
 
-  BPlusTree primary_index(&bpm);
+  BPlusTree primary_index =
+      index_meta ? BPlusTree(&bpm, index_meta->root_page_id) : BPlusTree(&bpm);
 
-  buildPrimaryIndex(table, schema, primary_index);
+  auto persistPrimaryIndexRoot = [&](page_id_t new_root_id) {
+    if (!catalog.updateIndexRoot("users_pk", new_root_id)) {
+      std::cerr << "[ERROR] Failed to persist primary index root.\n";
+    }
+  };
 
+  if (index_meta == nullptr) {
+    buildPrimaryIndex(table, schema, primary_index);
+
+    index_meta =
+        catalog.createIndex("users_pk", meta->name, primary_index.getRootId());
+
+    if (index_meta == nullptr) {
+      std::cerr << "Fatal error: could not create primary index metadata.\n";
+      return 1;
+    }
+  }
+
+  // From this point onward the catalog entry exists.
+  primary_index.setRootChangeCallback(persistPrimaryIndexRoot);
   // ----------------------------------------------------------
   // Known pages for playground visualization
   // ----------------------------------------------------------

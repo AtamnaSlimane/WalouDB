@@ -47,18 +47,23 @@ private:
   static constexpr page_id_t CATALOG_PAGE_ID = 0;
   void loadFromDisk();
   void persistEntry(const TableMetadata &meta);
+  void persistIndex(const IndexMetadata &meta);
 
-  static Schema catalogSchema();
+  static Schema catalogTableSchema();
+  static Schema catalogIndexSchema();
+
   static std::string encodeColumns(const std::vector<Column> &columns);
   static std::vector<Column> decodeColumns(const std::string &blob);
 
   BufferPoolManager *m_bpm;
-  std::unique_ptr<TableHeap> m_catalog_heap;
+  std::unique_ptr<TableHeap> m_catalog_table_heap;
+  std::unique_ptr<TableHeap> m_catalog_index_heap;
 
   std::unordered_map<std::string, TableMetadata> m_tables;
   std::unordered_map<std::string, IndexMetadata> m_indexes;
 
   page_id_t m_next_table_id{0};
+  page_id_t m_next_index_id{0};
 };
 
 } // namespace WalouDB
