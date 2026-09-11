@@ -47,6 +47,9 @@ void clearInput() {
   std::cin.clear();
   std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
+// ============================================================
+// Open / create a table and its primary index
+// ============================================================
 
 int readInt(const std::string &prompt) {
   while (true) {
@@ -847,7 +850,95 @@ TableMetadata *createTableInteractive(Catalog &catalog) {
 
   return meta;
 }
+// ============================================================
+// Open / create a table and its primary index
+// ============================================================
 
+bool openTable(Catalog &catalog, BufferPoolManager &bpm,
+               const std::string &table_name, TableMetadata *&current_meta,
+               std::unique_ptr<TableHeap> &current_table,
+               Schema &current_schema,
+               std::unique_ptr<BPlusTree> &current_primary_index) {
+
+  TableMetadata *meta = catalog.getTable(table_name);
+
+  if (meta == nullptr) {
+    std::cout << "\n[FAILED] Table '" << table_name << "' does not exist.\n";
+    return false;
+  }
+
+  // ----------------------------------------------------------
+  // All tables currently use the same schema
+  // ----------------------------------------------------------
+
+  current_schema = createSchema();
+
+  current_meta = meta;
+
+  current_table = std::make_unique<TableHeap>(&bpm, meta->first_page_id);
+
+  // ----------------------------------------------------------
+  // Every table has its own primary index
+  //
+  // users    -> users_pk
+  // products -> products_pk
+  // etc.
+  // ----------------------------------------------------------
+
+  const std::string index_name = table_name + "_pk";
+
+  IndexMetadata *index_meta = catalog.getIndex(index_name);
+
+  // ----------------------------------------------------------
+  // Existing index
+  // ----------------------------------------------------------
+
+  if (index_meta != nullptr) {
+
+    current_primary_index =
+        std::make_unique<BPlusTree>(&bpm, index_meta->root_page_id);
+  }
+
+  // ----------------------------------------------------------
+  // No index metadata -> create/rebuild it
+  // ----------------------------------------------------------
+
+  else {
+
+    current_primary_index = std::make_unique<BPlusTree>(&bpm);
+
+    buildPrimaryIndex(*current_table, current_schema, *current_primary_index);
+
+    index_meta = catalog.createIndex(index_name, table_name,
+                                     current_primary_index->getRootId());
+
+    if (index_meta == nullptr) {
+      std::cerr << "[ERROR] Could not create primary index for table '"
+                << table_name << "'.\n";
+
+      current_primary_index.reset();
+      current_table.reset();
+      current_meta = nullptr;
+
+      return false;
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Persist root changes for THIS table's index
+  // ----------------------------------------------------------
+
+  current_primary_index->setRootChangeCallback(
+      [&catalog, index_name](page_id_t new_root_id) {
+        if (!catalog.updateIndexRoot(index_name, new_root_id)) {
+
+          std::cerr << "[ERROR] Failed to persist root for index '"
+                    << index_name << "'.\n";
+        }
+      });
+
+  return true;
+}
 // ============================================================
 // Menu
 // ============================================================
@@ -898,6 +989,9 @@ void printMenu() {
 // ============================================================
 // Main
 // ============================================================
+// ============================================================
+// Main
+// ============================================================
 
 int main() {
   std::cout << R"(
@@ -917,100 +1011,135 @@ int main() {
 
   Catalog catalog(&bpm);
 
-  Schema default_schema = createSchema();
-
   // ----------------------------------------------------------
-  // Open or create default users table
-  // ----------------------------------------------------------
-
-  TableMetadata *meta = openOrCreateUsers(catalog, default_schema);
-
-  if (meta == nullptr) {
-    std::cerr << "\nFatal error: could not open users table.\n";
-    return 1;
-  }
-
-  TableHeap table(&bpm, meta->first_page_id);
-
-  Schema schema = default_schema;
-
-  // ----------------------------------------------------------
-  // Primary B+Tree
+  // Runtime state
   //
-  // Current implementation creates a fresh B+Tree root.
-  // Existing table rows are therefore indexed at startup.
+  // These always represent the table we are currently
+  // working with.
   // ----------------------------------------------------------
-  IndexMetadata *index_meta = catalog.getIndex("users_pk");
 
-  BPlusTree primary_index =
-      index_meta ? BPlusTree(&bpm, index_meta->root_page_id) : BPlusTree(&bpm);
+  TableMetadata *current_meta = nullptr;
 
-  auto persistPrimaryIndexRoot = [&](page_id_t new_root_id) {
-    if (!catalog.updateIndexRoot("users_pk", new_root_id)) {
-      std::cerr << "[ERROR] Failed to persist primary index root.\n";
-    }
-  };
+  std::unique_ptr<TableHeap> current_table;
 
-  if (index_meta == nullptr) {
-    buildPrimaryIndex(table, schema, primary_index);
+  Schema current_schema = createSchema();
 
-    index_meta =
-        catalog.createIndex("users_pk", meta->name, primary_index.getRootId());
+  std::unique_ptr<BPlusTree> current_primary_index;
 
-    if (index_meta == nullptr) {
-      std::cerr << "Fatal error: could not create primary index metadata.\n";
-      return 1;
-    }
-  }
-
-  // From this point onward the catalog entry exists.
-  primary_index.setRootChangeCallback(persistPrimaryIndexRoot);
   // ----------------------------------------------------------
-  // Known pages for playground visualization
+  // Known pages
+  //
+  // Used only by the playground's raw page visualization.
   // ----------------------------------------------------------
 
   std::vector<page_id_t> known_pages;
 
   known_pages.push_back(0);
-  if (meta->first_page_id != INVALID_PAGE_ID) {
-    known_pages.push_back(meta->first_page_id);
-  }
 
   // ----------------------------------------------------------
   // Known table names
+  //
+  // Used by catalog visualization.
   // ----------------------------------------------------------
 
   std::vector<std::string> known_table_names;
 
-  known_table_names.push_back(meta->name);
+  // ----------------------------------------------------------
+  // Open or create default table
+  //
+  // We start with "users", but users has no special meaning.
+  // ----------------------------------------------------------
+
+  TableMetadata *users_meta = catalog.getTable("users");
+
+  if (users_meta == nullptr) {
+
+    std::cout << "\nCreating default table 'users'...\n";
+
+    Schema schema = createSchema();
+
+    users_meta = catalog.createTable("users", schema);
+
+    if (users_meta == nullptr) {
+      std::cerr << "\nFatal error: could not create users table.\n";
+
+      return 1;
+    }
+
+    std::cout << "[SUCCESS] users table created.\n";
+  }
 
   // ----------------------------------------------------------
-  // Main menu loop
+  // Keep users in the known table list
+  // ----------------------------------------------------------
+
+  known_table_names.push_back("users");
+
+  if (users_meta->first_page_id != INVALID_PAGE_ID) {
+    known_pages.push_back(users_meta->first_page_id);
+  }
+
+  // ----------------------------------------------------------
+  // Open users
+  //
+  // This also loads/creates users_pk.
+  // ----------------------------------------------------------
+
+  if (!openTable(catalog, bpm, "users", current_meta, current_table,
+                 current_schema, current_primary_index)) {
+
+    std::cerr << "\nFatal error: could not open users table.\n";
+
+    return 1;
+  }
+
+  // ----------------------------------------------------------
+  // Main menu
   // ----------------------------------------------------------
 
   bool running = true;
 
   while (running) {
+
     printMenu();
+
+    // --------------------------------------------------------
+    // Current table information
+    // --------------------------------------------------------
+
+    std::cout << "\n";
+    printLine('-');
+
+    std::cout << "Current table : " << current_meta->name << '\n';
+
+    std::cout << "Table ID      : " << current_meta->table_id << '\n';
+
+    std::cout << "First page    : " << current_meta->first_page_id << '\n';
+
+    std::cout << "Primary index : " << current_meta->name << "_pk\n";
+
+    printLine('-');
 
     int choice = readInt("WalouDB >> ");
 
     switch (choice) {
 
-      // ========================================================
+      // ======================================================
       // EXIT
-      // ========================================================
+      // ======================================================
 
-    case 0:
+    case 0: {
       running = false;
       break;
+    }
 
-      // ========================================================
+      // ======================================================
       // RAW STORAGE
-      // ========================================================
+      // ======================================================
 
     case 1: {
       createNewPage(bpm, known_pages);
+
       break;
     }
 
@@ -1019,6 +1148,7 @@ int main() {
 
       if (page_id < 0) {
         std::cout << "Invalid page ID.\n";
+
         break;
       }
 
@@ -1032,6 +1162,7 @@ int main() {
 
       if (page_id < 0) {
         std::cout << "Invalid page ID.\n";
+
         break;
       }
 
@@ -1045,6 +1176,7 @@ int main() {
 
       if (page_id < 0) {
         std::cout << "Invalid page ID.\n";
+
         break;
       }
 
@@ -1058,6 +1190,7 @@ int main() {
 
       if (page_id < 0) {
         std::cout << "Invalid page ID.\n";
+
         break;
       }
 
@@ -1071,6 +1204,7 @@ int main() {
 
       if (page_id < 0) {
         std::cout << "Invalid page ID.\n";
+
         break;
       }
 
@@ -1084,6 +1218,7 @@ int main() {
 
       if (page_id < 0) {
         std::cout << "Invalid page ID.\n";
+
         break;
       }
 
@@ -1092,103 +1227,277 @@ int main() {
       break;
     }
 
-      // ========================================================
+      // ======================================================
       // BUFFER POOL
-      // ========================================================
+      // ======================================================
 
-    case 10:
+    case 10: {
       printBufferPool(bpm);
       break;
+    }
 
-    case 11:
+    case 11: {
       printLRU(bpm);
       break;
+    }
 
-      // ========================================================
+      // ======================================================
       // DISK
-      // ========================================================
+      // ======================================================
 
-    case 13:
+    case 13: {
       flushAllPages(bpm);
       break;
+    }
 
-      // ========================================================
+      // ======================================================
       // TABLE
-      // ========================================================
+      // ======================================================
 
-    case 14:
-      insertIntoTable(table, schema, primary_index);
-      break;
+    case 14: {
 
-    case 15:
-      getFromTable(table, schema);
-      break;
-
-    case 16:
-      updateInTable(table, schema, primary_index);
-      break;
-
-    case 17:
-      deleteFromTable(table, primary_index);
-      break;
-
-    case 18:
-      insertDummyRows(table, schema, primary_index);
-      break;
-
-    case 19:
-      visualizeTable(table, schema);
-      break;
-
-    case 20: {
-      TableMetadata *new_meta = createTableInteractive(catalog);
-
-      if (new_meta != nullptr) {
-        known_table_names.push_back(new_meta->name);
-
-        std::cout << "\nNote: the playground is still operating "
-                     "on the current users table.\n";
-      }
+      insertIntoTable(*current_table, current_schema, *current_primary_index);
 
       break;
     }
 
-    case 21:
+    case 15: {
+
+      getFromTable(*current_table, current_schema);
+
+      break;
+    }
+
+    case 16: {
+
+      updateInTable(*current_table, current_schema, *current_primary_index);
+
+      break;
+    }
+
+    case 17: {
+
+      deleteFromTable(*current_table, *current_primary_index);
+
+      break;
+    }
+
+    case 18: {
+
+      insertDummyRows(*current_table, current_schema, *current_primary_index);
+
+      break;
+    }
+
+    case 19: {
+
+      visualizeTable(*current_table, current_schema);
+
+      break;
+    }
+
+      // ======================================================
+      // CREATE / SWITCH TABLE
+      // ======================================================
+
+    case 20: {
+
+      printTitle("OPEN / CREATE TABLE");
+
+      std::string table_name = readString("Enter table name: ");
+
+      if (table_name.empty()) {
+
+        std::cout << "[FAILED] Table name cannot be empty.\n";
+
+        break;
+      }
+
+      // ------------------------------------------------------
+      // Existing table
+      //
+      // Simply switch to it.
+      // ------------------------------------------------------
+
+      TableMetadata *existing = catalog.getTable(table_name);
+
+      if (existing != nullptr) {
+
+        if (openTable(catalog, bpm, table_name, current_meta, current_table,
+                      current_schema, current_primary_index)) {
+
+          std::cout << "\n[SUCCESS] Switched to table '" << table_name
+                    << "'.\n";
+
+          std::cout << "Primary index: " << table_name << "_pk\n";
+        }
+
+        break;
+      }
+
+      // ------------------------------------------------------
+      // New table
+      //
+      // Every table gets the same schema.
+      // ------------------------------------------------------
+
+      std::cout << "\nTable '" << table_name << "' does not exist.\n";
+
+      std::cout << "Creating table with schema:\n";
+
+      std::cout << "  id   INTEGER\n";
+
+      std::cout << "  name VARCHAR\n";
+
+      Schema schema = createSchema();
+
+      TableMetadata *new_meta = catalog.createTable(table_name, schema);
+
+      if (new_meta == nullptr) {
+
+        std::cout << "\n[FAILED] Could not create table.\n";
+
+        break;
+      }
+
+      // ------------------------------------------------------
+      // Add to known table list
+      // ------------------------------------------------------
+
+      known_table_names.push_back(table_name);
+
+      if (new_meta->first_page_id != INVALID_PAGE_ID) {
+
+        known_pages.push_back(new_meta->first_page_id);
+      }
+
+      // ------------------------------------------------------
+      // Immediately switch to the new table
+      //
+      // openTable() also creates its primary index.
+      // ------------------------------------------------------
+
+      if (!openTable(catalog, bpm, table_name, current_meta, current_table,
+                     current_schema, current_primary_index)) {
+
+        std::cout << "\n[FAILED] Table was created, "
+                     "but could not be opened.\n";
+
+        break;
+      }
+
+      std::cout << "\n[SUCCESS] Created and switched to table '" << table_name
+                << "'.\n";
+
+      std::cout << "Table ID      : " << current_meta->table_id << '\n';
+
+      std::cout << "First page    : " << current_meta->first_page_id << '\n';
+
+      std::cout << "Primary index : " << table_name << "_pk\n";
+
+      break;
+    }
+
+      // ======================================================
+      // CATALOG
+      // ======================================================
+
+    case 21: {
+
       visualizeCatalog(catalog, known_table_names);
-      break;
 
-      // ========================================================
+      break;
+    }
+
+      // ======================================================
       // PRIMARY INDEX
-      // ========================================================
+      // ======================================================
 
-    case 22:
-      searchByPrimaryKey(table, schema, primary_index);
-      break;
+    case 22: {
 
-    case 23:
-      primary_index = BPlusTree(&bpm);
-
-      buildPrimaryIndex(table, schema, primary_index);
+      searchByPrimaryKey(*current_table, current_schema,
+                         *current_primary_index);
 
       break;
+    }
 
-      // ========================================================
+    case 23: {
+
+      printTitle("REBUILD PRIMARY INDEX");
+
+      const std::string index_name = current_meta->name + "_pk";
+
+      // ------------------------------------------------------
+      // Create completely fresh B+Tree
+      // ------------------------------------------------------
+
+      current_primary_index = std::make_unique<BPlusTree>(&bpm);
+
+      // ------------------------------------------------------
+      // Rebuild from current table
+      // ------------------------------------------------------
+
+      buildPrimaryIndex(*current_table, current_schema, *current_primary_index);
+
+      // ------------------------------------------------------
+      // Persist new root
+      // ------------------------------------------------------
+
+      if (!catalog.updateIndexRoot(index_name,
+                                   current_primary_index->getRootId())) {
+
+        std::cerr << "[ERROR] Failed to persist rebuilt "
+                     "index root.\n";
+
+        break;
+      }
+
+      // ------------------------------------------------------
+      // Restore root-change callback
+      // ------------------------------------------------------
+
+      current_primary_index->setRootChangeCallback(
+          [&catalog, index_name](page_id_t new_root_id) {
+            if (!catalog.updateIndexRoot(index_name, new_root_id)) {
+
+              std::cerr << "[ERROR] Failed to persist root "
+                           "for index '"
+                        << index_name << "'.\n";
+            }
+          });
+
+      std::cout << "\n[SUCCESS] Rebuilt primary index for table '"
+                << current_meta->name << "'.\n";
+
+      std::cout << "New root page: " << current_primary_index->getRootId()
+                << '\n';
+
+      break;
+    }
+
+      // ======================================================
       // UNKNOWN COMMAND
-      // ========================================================
+      // ======================================================
 
-    default:
+    default: {
+
       std::cout << "\nUnknown command.\n";
+
       break;
+    }
     }
   }
 
-  // ----------------------------------------------------------
-  // Flush known pages before shutdown
-  // ----------------------------------------------------------
+  // ==========================================================
+  // Shutdown
+  // ==========================================================
 
   std::cout << "\n";
+
   printLine('=');
+
   std::cout << "Shutting down WalouDB...\n";
+
   printLine('=');
 
   flushAllPages(bpm);
