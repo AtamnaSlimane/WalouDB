@@ -36,6 +36,7 @@ Schema createSchema() {
   return Schema({
       {"id", TypeId::INTEGER},
       {"name", TypeId::VARCHAR},
+      {"age", TypeId::INTEGER},
   });
 }
 
@@ -570,11 +571,12 @@ void insertDummyRows(TableHeap &table, const Schema &schema,
     }
 
     std::string name = table_name + "_" + std::to_string(id);
-
+    int32_t age = 18 + (id % 50);
     Tuple tuple = Tuple::Serialize(
         {
             Value(static_cast<int32_t>(id)),
             Value(name),
+            Value(static_cast<int32_t>(age)),
         },
         schema);
 
@@ -676,19 +678,13 @@ void visualizeCatalog(Catalog &catalog) {
 
     std::vector<IndexMetadata *> indexes = catalog.getIndexesForTable(name);
 
-    std::cout << "Indexes     : ";
-
     if (indexes.empty()) {
-      std::cout << "(none built yet)\n";
+      std::cout << "Indexes     : (none built yet)\n";
     } else {
-      std::cout << indexes.size() << '\n';
-
-      for (IndexMetadata *index_meta : indexes) {
-        std::cout << "  - " << index_meta->name << '\n';
-
-        std::cout << "      Index ID  : " << index_meta->index_id << '\n';
-
-        std::cout << "      Root page : " << index_meta->root_page_id << '\n';
+      std::cout << "Indexes     : " << indexes.size() << '\n';
+      for (IndexMetadata *idx : indexes) {
+        std::cout << "  - " << idx->name << " (root=" << idx->root_page_id
+                  << ")\n";
       }
     }
   }
@@ -930,9 +926,8 @@ bool openTable(Catalog &catalog, BufferPoolManager &bpm,
 
     buildPrimaryIndex(*current_table, current_schema, *current_primary_index);
 
-    index_meta = catalog.createIndex(index_name, table_name,
+    index_meta = catalog.createIndex(index_name, table_name, "id",
                                      current_primary_index->getRootId());
-
     if (index_meta == nullptr) {
       std::cerr << "[ERROR] Could not create primary index for table '"
                 << table_name << "'.\n";
@@ -1002,6 +997,8 @@ void printMenu() {
   std::cout << " 23. Rebuild primary index\n";
   std::cout << " 24. Show all tables (detailed)\n";
   std::cout << " 25. Range search by primary key\n";
+  std::cout << " 26. Make a secondary index\n";
+  std::cout << " 27. Range search by secondary key\n";
 
   std::cout << "\n";
   std::cout << "  0. Exit\n";
@@ -1118,6 +1115,40 @@ void rangeSearchByPrimaryKey(TableHeap &table, const Schema &schema,
 
   std::cout << "\nRange scan time: " << elapsed.count() << " µs\n";
 }
+void buildIndex(TableHeap &table, const Schema &schema, BPlusTree &index,
+                size_t column_index) {
+
+  int indexed = 0;
+  int duplicates = 0;
+
+  for (auto it = table.begin(); it != table.end(); ++it) {
+
+    Tuple tuple = *it;
+    RID rid = it.getRID();
+
+    Value key_value = tuple.getValue(schema, column_index);
+
+    if (key_value.getType() != TypeId::INTEGER) {
+      continue;
+    }
+
+    int32_t key = key_value.getInteger();
+
+    if (key < 0) {
+      continue;
+    }
+
+    if (!index.insert(static_cast<uint32_t>(key), rid)) {
+      ++duplicates;
+      continue;
+    }
+
+    ++indexed;
+  }
+
+  std::cout << "Indexed rows : " << indexed << '\n';
+  std::cout << "Duplicates   : " << duplicates << '\n';
+}
 int main() {
   std::cout << R"(
 ============================================================
@@ -1150,7 +1181,8 @@ int main() {
   Schema current_schema = createSchema();
 
   std::unique_ptr<BPlusTree> current_primary_index;
-
+  std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+      current_secondary_indexes;
   // ----------------------------------------------------------
   // Known pages
   //
@@ -1597,6 +1629,69 @@ int main() {
     case 25: {
       rangeSearchByPrimaryKey(*current_table, current_schema,
                               *current_primary_index);
+      break;
+    }
+    case 26: { // "Create secondary index on column"
+      printTitle("CREATE SECONDARY INDEX");
+
+      std::string column_name = readString("Enter column name to index: ");
+
+      // find its position in the schema
+      int col_idx = -1;
+      for (size_t i = 0; i < current_schema.getColumnCount(); ++i) {
+        if (current_schema.getColumn(i).name == column_name) {
+          col_idx = static_cast<int>(i);
+          break;
+        }
+      }
+
+      if (col_idx < 0) {
+        std::cout << "[FAILED] Column '" << column_name << "' not found.\n";
+        break;
+      }
+
+      auto new_index = std::make_unique<BPlusTree>(&bpm);
+      buildIndex(*current_table, current_schema, *new_index,
+                 static_cast<size_t>(col_idx));
+
+      const std::string index_name =
+          current_meta->name + "_" + column_name + "_idx";
+
+      IndexMetadata *meta = catalog.createIndex(
+          index_name, current_meta->name, column_name, new_index->getRootId());
+      // (createIndex would need the column_name param added per point 2)
+
+      new_index->setRootChangeCallback(
+          [&catalog, index_name](page_id_t new_root) {
+            catalog.updateIndexRoot(index_name, new_root);
+          });
+
+      current_secondary_indexes[column_name] = std::move(new_index);
+
+      std::cout << "[SUCCESS] Created index '" << index_name << "'.\n";
+      break;
+    }
+    case 27: { // "Range search by age"
+      auto it = current_secondary_indexes.find("age");
+      if (it == current_secondary_indexes.end()) {
+        std::cout << "[FAILED] No index on 'age' for this table.\n";
+        break;
+      }
+
+      int low = readInt("Enter low age: ");
+      int high = readInt("Enter high age: ");
+
+      std::vector<Entry> entries;
+      it->second->rangeSearch(static_cast<uint32_t>(low),
+                              static_cast<uint32_t>(high), &entries);
+
+      for (const Entry &e : entries) {
+        Tuple tuple;
+        if (current_table->getTuple(e.rid, &tuple)) {
+          printTupleValues(tuple, current_schema);
+          printBorder();
+        }
+      }
       break;
     }
       // ======================================================

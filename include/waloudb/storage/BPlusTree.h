@@ -122,9 +122,9 @@ public:
     int idx = findKeyIndex(entry.key);
     int count = getKeyCount();
 
-    if (idx < count && getEntry(idx)->key == entry.key) {
-      return false; // dupelicate key
-    }
+    // if (idx < count && getEntry(idx)->key == entry.key) {
+    //   return false; // dupelicate key
+    // }
 
     for (int i = count; i > idx; i--) {
       *getEntry(i) = *getEntry(i - 1);

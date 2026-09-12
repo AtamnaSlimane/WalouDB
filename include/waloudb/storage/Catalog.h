@@ -21,6 +21,7 @@ struct IndexMetadata {
   uint32_t index_id;
   std::string name;
   std::string table_name;
+  std::string column_name;
   page_id_t root_page_id;
 };
 
@@ -34,6 +35,7 @@ public:
 
   IndexMetadata *createIndex(const std::string &index_name,
                              const std::string &table_name,
+                             const std::string &column_name,
                              page_id_t root_page_id);
 
   IndexMetadata *getIndex(const std::string &index_name);

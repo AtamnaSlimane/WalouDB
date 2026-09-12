@@ -239,6 +239,7 @@ TableMetadata *Catalog::getTable(const std::string &name) {
 // indexes
 IndexMetadata *Catalog::createIndex(const std::string &index_name,
                                     const std::string &table_name,
+                                    const std::string &column_name,
                                     page_id_t root_page_id) {
   if (m_indexes.count(index_name)) {
     return nullptr;
@@ -248,6 +249,7 @@ IndexMetadata *Catalog::createIndex(const std::string &index_name,
   meta.table_name = table_name;
   meta.index_id = m_next_index_id++;
   meta.name = index_name;
+  meta.column_name = column_name;
   persistIndex(meta);
   auto [it, inserted] = m_indexes.emplace(index_name, std::move(meta));
   return &it->second;
@@ -261,6 +263,7 @@ void Catalog::persistIndex(const IndexMetadata &meta) {
           Value(static_cast<int32_t>(meta.index_id)),
           Value(meta.name),
           Value(meta.table_name),
+          Value(meta.column_name),
           Value(static_cast<int32_t>(meta.root_page_id)),
       },
       schema);
