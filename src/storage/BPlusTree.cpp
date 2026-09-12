@@ -54,6 +54,90 @@ bool BPlusTree::search(uint32_t key, RID *out_rid) const {
     }
   }
 }
+
+bool BPlusTree::rangeSearch(uint32_t low, uint32_t high,
+                            std::vector<Entry> *out_entries) const {
+  if (out_entries == nullptr) {
+    return false;
+  }
+  if (low > high) {
+    return false;
+  }
+  out_entries->clear();
+
+  page_id_t current_id = m_root_page_id;
+  while (true) {
+    Page *page = m_bpm->fetchPage(current_id);
+    if (page == nullptr) {
+      return false;
+    }
+    NodeHeader *h = reinterpret_cast<NodeHeader *>(page->getData());
+    if (h->page_type == NodeType::LEAF) {
+      m_bpm->unpinPage(current_id, false);
+      break;
+    } else if (h->page_type == NodeType::INTERNAL) {
+      InternalNode internal(page->getData());
+
+      page_id_t next_id = internal.findChild(low);
+
+      m_bpm->unpinPage(current_id, false);
+
+      if (next_id == INVALID_PAGE_ID) {
+        return false;
+      }
+
+      current_id = next_id;
+    } else {
+      m_bpm->unpinPage(current_id, false);
+      return false;
+    }
+  }
+  page_id_t leaf_id = current_id;
+
+  while (leaf_id != INVALID_PAGE_ID) {
+
+    Page *page = m_bpm->fetchPage(leaf_id);
+
+    if (page == nullptr) {
+      return !out_entries->empty();
+    }
+
+    LeafNode leaf(page->getData());
+
+    auto entries = leaf.getAllEntries();
+
+    page_id_t next_leaf_id = leaf.getNextLeafId();
+
+    m_bpm->unpinPage(leaf_id, false);
+
+    // Entries within a leaf are kept sorted by key (see split()),
+    // so we can stop scanning this leaf as soon as we pass high_key.
+
+    bool exceeded_upper_bound = false;
+
+    for (const Entry &e : entries) {
+
+      if (e.key < low) {
+        continue;
+      }
+
+      if (e.key > high) {
+        exceeded_upper_bound = true;
+        break;
+      }
+
+      out_entries->push_back(e);
+    }
+
+    if (exceeded_upper_bound) {
+      break;
+    }
+
+    leaf_id = next_leaf_id;
+  }
+  return true;
+};
+
 bool BPlusTree::insert(uint32_t key, RID rid) {
   page_id_t current_id = m_root_page_id;
   while (true) {

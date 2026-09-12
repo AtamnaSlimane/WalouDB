@@ -419,6 +419,8 @@ public:
   bool search(uint32_t key, RID *out_rid) const;
   bool insert(uint32_t key, RID rid);
   bool split(page_id_t page_id, Entry &entry, page_id_t right_child_id);
+  bool rangeSearch(uint32_t low, uint32_t high,
+                   std::vector<Entry> *out_entries) const;
 
   page_id_t getRootId() { return m_root_page_id; }
   // bool getValue(uint32_t key, RID *rid);

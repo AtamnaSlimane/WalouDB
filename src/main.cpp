@@ -1001,6 +1001,7 @@ void printMenu() {
   std::cout << " 22. Search by primary key\n";
   std::cout << " 23. Rebuild primary index\n";
   std::cout << " 24. Show all tables (detailed)\n";
+  std::cout << " 25. Range search by primary key\n";
 
   std::cout << "\n";
   std::cout << "  0. Exit\n";
@@ -1065,7 +1066,58 @@ void showAllTablesDetailed(Catalog &catalog, BufferPoolManager &bpm) {
 // ============================================================
 // Main
 // ============================================================
+void rangeSearchByPrimaryKey(TableHeap &table, const Schema &schema,
+                             BPlusTree &primary_index) {
+  printTitle("PRIMARY KEY RANGE SEARCH");
 
+  int low = readInt("Enter low key (inclusive): ");
+  int high = readInt("Enter high key (inclusive): ");
+
+  if (low < 0 || high < 0 || low > high) {
+    std::cout << "\n[FAILED] Invalid range.\n";
+    return;
+  }
+
+  std::vector<Entry> entries;
+
+  auto start = std::chrono::steady_clock::now();
+
+  bool ok = primary_index.rangeSearch(static_cast<uint32_t>(low),
+                                      static_cast<uint32_t>(high), &entries);
+
+  auto end = std::chrono::steady_clock::now();
+
+  auto elapsed =
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+  if (!ok) {
+    std::cout << "\n[FAILED] Range search failed.\n";
+    return;
+  }
+
+  std::cout << "\n[FOUND] " << entries.size() << " matching row(s).\n";
+
+  printBorder();
+
+  for (const Entry &e : entries) {
+
+    Tuple tuple;
+
+    if (!table.getTuple(e.rid, &tuple)) {
+      std::cout << "Key " << e.key << " -> [MISSING TUPLE]\n";
+      continue;
+    }
+
+    std::cout << "Key " << e.key << " -> RID(" << e.rid.page_id << ", "
+              << e.rid.slot_num << ")\n";
+
+    printTupleValues(tuple, schema);
+
+    printBorder();
+  }
+
+  std::cout << "\nRange scan time: " << elapsed.count() << " µs\n";
+}
 int main() {
   std::cout << R"(
 ============================================================
@@ -1540,6 +1592,11 @@ int main() {
 
       showAllTablesDetailed(catalog, bpm);
 
+      break;
+    }
+    case 25: {
+      rangeSearchByPrimaryKey(*current_table, current_schema,
+                              *current_primary_index);
       break;
     }
       // ======================================================
