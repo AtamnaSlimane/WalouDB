@@ -337,4 +337,25 @@ bool Catalog::updateIndexRoot(const std::string &index_name,
 
   return false;
 }
+// for main
+std::vector<std::string> Catalog::getAllTableNames() const {
+  std::vector<std::string> names;
+  names.reserve(m_tables.size()); // adjust to your actual member name
+  for (const auto &[name, meta] : m_tables) {
+    names.push_back(name);
+  }
+  return names;
+}
+std::vector<IndexMetadata *>
+Catalog::getIndexesForTable(const std::string &table_name) {
+  std::vector<IndexMetadata *> result;
+
+  for (auto &[name, meta] : m_indexes) {
+    if (meta.table_name == table_name) {
+      result.push_back(&meta);
+    }
+  }
+
+  return result;
+}
 } // namespace WalouDB

@@ -546,7 +546,7 @@ bool deleteFromTable(TableHeap &table, BPlusTree &primary_index) {
 }
 
 void insertDummyRows(TableHeap &table, const Schema &schema,
-                     BPlusTree &primary_index) {
+                     BPlusTree &primary_index, const std::string &table_name) {
   printTitle("INSERT DUMMY ROWS");
 
   int count = readInt("How many rows? ");
@@ -569,7 +569,7 @@ void insertDummyRows(TableHeap &table, const Schema &schema,
       continue;
     }
 
-    std::string name = "User_" + std::to_string(id);
+    std::string name = table_name + "_" + std::to_string(id);
 
     Tuple tuple = Tuple::Serialize(
         {
@@ -638,10 +638,10 @@ void visualizeTable(TableHeap &table, const Schema &schema) {
 // ============================================================
 // Catalog visualization
 // ============================================================
-
-void visualizeCatalog(Catalog &catalog,
-                      const std::vector<std::string> &table_names) {
+void visualizeCatalog(Catalog &catalog) {
   printTitle("CATALOG");
+
+  std::vector<std::string> table_names = catalog.getAllTableNames();
 
   if (table_names.empty()) {
     std::cout << "No known tables.\n";
@@ -669,9 +669,30 @@ void visualizeCatalog(Catalog &catalog,
     for (const Column &column : meta->columns) {
       std::cout << "  - " << column.name << '\n';
     }
+
+    // --------------------------------------------------------
+    // Indexes for this table
+    // --------------------------------------------------------
+
+    std::vector<IndexMetadata *> indexes = catalog.getIndexesForTable(name);
+
+    std::cout << "Indexes     : ";
+
+    if (indexes.empty()) {
+      std::cout << "(none built yet)\n";
+    } else {
+      std::cout << indexes.size() << '\n';
+
+      for (IndexMetadata *index_meta : indexes) {
+        std::cout << "  - " << index_meta->name << '\n';
+
+        std::cout << "      Index ID  : " << index_meta->index_id << '\n';
+
+        std::cout << "      Root page : " << index_meta->root_page_id << '\n';
+      }
+    }
   }
 }
-
 // ============================================================
 // Primary index
 // ============================================================
@@ -979,13 +1000,65 @@ void printMenu() {
   std::cout << "\nINDEX\n";
   std::cout << " 22. Search by primary key\n";
   std::cout << " 23. Rebuild primary index\n";
+  std::cout << " 24. Show all tables (detailed)\n";
 
   std::cout << "\n";
   std::cout << "  0. Exit\n";
 
   printLine('=');
 }
+// ============================================================
+// Show all tables (detailed)
+// ============================================================
 
+void showAllTablesDetailed(Catalog &catalog, BufferPoolManager &bpm) {
+  printTitle("ALL TABLES (DETAILED)");
+
+  std::vector<std::string> table_names = catalog.getAllTableNames();
+
+  if (table_names.empty()) {
+    std::cout << "No known tables.\n";
+    return;
+  }
+
+  for (const std::string &name : table_names) {
+    TableMetadata *meta = catalog.getTable(name);
+    if (meta == nullptr)
+      continue;
+
+    std::cout << '\n';
+    printBorder();
+    std::cout << "TABLE: " << meta->name << '\n';
+    printBorder();
+
+    std::cout << "Table ID     : " << meta->table_id << '\n';
+    std::cout << "First page   : " << meta->first_page_id << '\n';
+    std::cout << "Columns      : " << meta->columns.size() << '\n';
+    for (const Column &column : meta->columns) {
+      std::cout << "  - " << column.name << '\n';
+    }
+
+    TableHeap scratch_heap(&bpm, meta->first_page_id);
+    int row_count = 0;
+    for (auto it = scratch_heap.begin(); it != scratch_heap.end(); ++it) {
+      ++row_count;
+    }
+    std::cout << "Row count    : " << row_count << '\n';
+
+    const std::string index_name = name + "_pk";
+    IndexMetadata *index_meta = catalog.getIndex(index_name);
+    if (index_meta != nullptr) {
+      std::cout << "Primary index: " << index_name << '\n';
+      std::cout << "  Root page  : " << index_meta->root_page_id << '\n';
+    } else {
+      std::cout << "Primary index: (none built yet)\n";
+    }
+  }
+
+  std::cout << '\n';
+  printBorder();
+  std::cout << "Total tables: " << table_names.size() << '\n';
+}
 // ============================================================
 // Main
 // ============================================================
@@ -1037,14 +1110,6 @@ int main() {
   known_pages.push_back(0);
 
   // ----------------------------------------------------------
-  // Known table names
-  //
-  // Used by catalog visualization.
-  // ----------------------------------------------------------
-
-  std::vector<std::string> known_table_names;
-
-  // ----------------------------------------------------------
   // Open or create default table
   //
   // We start with "users", but users has no special meaning.
@@ -1072,8 +1137,6 @@ int main() {
   // ----------------------------------------------------------
   // Keep users in the known table list
   // ----------------------------------------------------------
-
-  known_table_names.push_back("users");
 
   if (users_meta->first_page_id != INVALID_PAGE_ID) {
     known_pages.push_back(users_meta->first_page_id);
@@ -1284,7 +1347,8 @@ int main() {
 
     case 18: {
 
-      insertDummyRows(*current_table, current_schema, *current_primary_index);
+      insertDummyRows(*current_table, current_schema, *current_primary_index,
+                      current_meta->name);
 
       break;
     }
@@ -1364,8 +1428,6 @@ int main() {
       // Add to known table list
       // ------------------------------------------------------
 
-      known_table_names.push_back(table_name);
-
       if (new_meta->first_page_id != INVALID_PAGE_ID) {
 
         known_pages.push_back(new_meta->first_page_id);
@@ -1404,7 +1466,7 @@ int main() {
 
     case 21: {
 
-      visualizeCatalog(catalog, known_table_names);
+      visualizeCatalog(catalog);
 
       break;
     }
@@ -1474,7 +1536,12 @@ int main() {
 
       break;
     }
+    case 24: {
 
+      showAllTablesDetailed(catalog, bpm);
+
+      break;
+    }
       // ======================================================
       // UNKNOWN COMMAND
       // ======================================================

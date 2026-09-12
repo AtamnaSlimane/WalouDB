@@ -42,6 +42,9 @@ public:
   bool dropTable(const std::string &table_name);
   bool hasTable(std::string &table_name);
   TableMetadata *getTable(const std::string &name);
+  std::vector<std::string> getAllTableNames() const;
+  std::vector<IndexMetadata *>
+  getIndexesForTable(const std::string &table_name);
 
 private:
   static constexpr page_id_t CATALOG_PAGE_ID = 0;
