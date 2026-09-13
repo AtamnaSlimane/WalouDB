@@ -16,7 +16,10 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace WalouDB;
@@ -29,16 +32,13 @@ constexpr size_t BUFFER_POOL_SIZE = 4096 * 100;
 constexpr const char *DATABASE_FILE = "waloudb.db";
 
 // ============================================================
-// Schema
+// Runtime table state
 // ============================================================
 
-Schema createSchema() {
-  return Schema({
-      {"id", TypeId::INTEGER},
-      {"name", TypeId::VARCHAR},
-      {"age", TypeId::INTEGER},
-  });
-}
+struct TableCreationInfo {
+  Schema schema;
+  std::string primary_column;
+};
 
 // ============================================================
 // Input helpers
@@ -48,15 +48,12 @@ void clearInput() {
   std::cin.clear();
   std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
-// ============================================================
-// Open / create a table and its primary index
-// ============================================================
 
 int readInt(const std::string &prompt) {
   while (true) {
     std::cout << prompt;
 
-    int value;
+    int value{};
 
     if (std::cin >> value) {
       clearInput();
@@ -95,6 +92,37 @@ void printTitle(const std::string &title) {
 void printBorder() { printLine('-'); }
 
 // ============================================================
+// Schema helpers
+// ============================================================
+
+Schema schemaFromMetadata(const TableMetadata &meta) {
+  return Schema(meta.columns);
+}
+
+bool findColumnIndex(const Schema &schema, const std::string &name,
+                     size_t &index) {
+  for (size_t i = 0; i < schema.getColumnCount(); ++i) {
+    if (schema.getColumn(i).name == name) {
+      index = i;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool isIntegerPrimaryColumn(const Schema &schema,
+                            const std::string &primary_column) {
+  size_t index{};
+
+  if (!findColumnIndex(schema, primary_column, index)) {
+    return false;
+  }
+
+  return schema.getColumn(index).type == TypeId::INTEGER;
+}
+
+// ============================================================
 // Tuple printing
 // ============================================================
 
@@ -102,7 +130,7 @@ void printTupleValues(const Tuple &tuple, const Schema &schema) {
   for (size_t i = 0; i < schema.getColumnCount(); ++i) {
     const Column &column = schema.getColumn(i);
 
-    std::cout << std::left << std::setw(15) << column.name << ": ";
+    std::cout << std::left << std::setw(18) << column.name << ": ";
 
     Value value = tuple.getValue(schema, i);
 
@@ -116,219 +144,6 @@ void printTupleValues(const Tuple &tuple, const Schema &schema) {
 
     std::cout << '\n';
   }
-}
-
-// ============================================================
-// Raw page helpers
-// ============================================================
-
-bool createNewPage(BufferPoolManager &bpm,
-                   std::vector<page_id_t> &known_pages) {
-  page_id_t page_id = INVALID_PAGE_ID;
-
-  Page *page = bpm.newPage(&page_id);
-
-  if (page == nullptr) {
-    std::cout << "\n[FAILED] Could not allocate a new page.\n";
-    return false;
-  }
-
-  SlottedPage slotted(page->getData());
-  slotted.Init(page_id);
-
-  bpm.unpinPage(page_id, true);
-
-  known_pages.push_back(page_id);
-
-  std::cout << "\n[SUCCESS] Created page " << page_id << '\n';
-
-  return true;
-}
-
-bool switchActivePage(BufferPoolManager &bpm, page_id_t page_id) {
-  Page *page = bpm.fetchPage(page_id);
-
-  if (page == nullptr) {
-    std::cout << "\n[FAILED] Could not fetch page " << page_id << ".\n";
-    return false;
-  }
-
-  SlottedPage slotted(page->getData());
-
-  std::cout << "\nPage ID     : " << slotted.getPageId() << '\n';
-
-  std::cout << "Slot count  : " << slotted.getSlotCount() << '\n';
-
-  std::cout << "Free space  : " << slotted.freeSpace() << " bytes\n";
-
-  bpm.unpinPage(page_id, false);
-
-  return true;
-}
-
-bool insertTupleRaw(BufferPoolManager &bpm, page_id_t page_id) {
-  printTitle("RAW PAGE INSERT");
-
-  Page *page = bpm.fetchPage(page_id);
-
-  if (page == nullptr) {
-    std::cout << "[FAILED] Page not found.\n";
-    return false;
-  }
-
-  std::string text = readString("Enter string to insert: ");
-
-  Schema schema({
-      {"value", TypeId::VARCHAR},
-  });
-
-  Tuple tuple = Tuple::Serialize({Value(text)}, schema);
-
-  SlottedPage slotted(page->getData());
-
-  RID rid{};
-
-  if (!slotted.insertTuple(tuple, &rid)) {
-    std::cout << "\n[FAILED] Tuple could not be inserted.\n";
-
-    bpm.unpinPage(page_id, false);
-    return false;
-  }
-
-  bpm.unpinPage(page_id, true);
-
-  std::cout << "\n[SUCCESS]\n";
-  std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
-
-  return true;
-}
-
-bool getTupleRaw(BufferPoolManager &bpm, page_id_t page_id) {
-  printTitle("RAW PAGE READ");
-
-  uint16_t slot_num = static_cast<uint16_t>(readInt("Enter slot number: "));
-
-  Page *page = bpm.fetchPage(page_id);
-
-  if (page == nullptr) {
-    std::cout << "[FAILED] Page not found.\n";
-    return false;
-  }
-
-  SlottedPage slotted(page->getData());
-
-  auto tuple = slotted.getTuple(slot_num);
-
-  if (!tuple.has_value()) {
-    std::cout << "\n[NOT FOUND] Slot does not contain a tuple.\n";
-
-    bpm.unpinPage(page_id, false);
-    return false;
-  }
-
-  Schema schema({
-      {"value", TypeId::VARCHAR},
-  });
-
-  printBorder();
-  printTupleValues(*tuple, schema);
-  printBorder();
-
-  bpm.unpinPage(page_id, false);
-
-  return true;
-}
-
-bool deleteTupleRaw(BufferPoolManager &bpm, page_id_t page_id) {
-  printTitle("RAW PAGE DELETE");
-
-  uint16_t slot_num = static_cast<uint16_t>(readInt("Enter slot number: "));
-
-  Page *page = bpm.fetchPage(page_id);
-
-  if (page == nullptr) {
-    std::cout << "[FAILED] Page not found.\n";
-    return false;
-  }
-
-  SlottedPage slotted(page->getData());
-
-  if (!slotted.deleteTuple(slot_num)) {
-    std::cout << "\n[FAILED] Could not delete tuple.\n";
-
-    bpm.unpinPage(page_id, false);
-    return false;
-  }
-
-  bpm.unpinPage(page_id, true);
-
-  std::cout << "\n[SUCCESS] Tuple deleted.\n";
-
-  return true;
-}
-
-bool compactActivePage(BufferPoolManager &bpm, page_id_t page_id) {
-  printTitle("COMPACT PAGE");
-
-  Page *page = bpm.fetchPage(page_id);
-
-  if (page == nullptr) {
-    std::cout << "[FAILED] Page not found.\n";
-    return false;
-  }
-
-  SlottedPage slotted(page->getData());
-
-  std::cout << "Free space before: " << slotted.freeSpace() << " bytes\n";
-
-  slotted.compact();
-
-  std::cout << "Free space after : " << slotted.freeSpace() << " bytes\n";
-
-  bpm.unpinPage(page_id, true);
-
-  return true;
-}
-
-void visualizeActivePage(BufferPoolManager &bpm, page_id_t page_id) {
-  printTitle("PAGE VISUALIZATION");
-
-  Page *page = bpm.fetchPage(page_id);
-
-  if (page == nullptr) {
-    std::cout << "[FAILED] Page not found.\n";
-    return;
-  }
-
-  SlottedPage slotted(page->getData());
-
-  std::cout << "Page ID       : " << slotted.getPageId() << '\n';
-
-  std::cout << "Lower         : " << slotted.getLower() << '\n';
-
-  std::cout << "Upper         : " << slotted.getUpper() << '\n';
-
-  std::cout << "Slot count    : " << slotted.getSlotCount() << '\n';
-
-  std::cout << "Free space    : " << slotted.freeSpace() << " bytes\n";
-
-  std::cout << "Next page     : " << slotted.getNextPageId() << '\n';
-
-  printBorder();
-
-  for (uint16_t i = 0; i < slotted.getSlotCount(); ++i) {
-    auto slot = slotted.getSlotInfo(i);
-
-    if (!slot.has_value()) {
-      continue;
-    }
-
-    std::cout << "Slot " << std::setw(4) << i << " | offset=" << std::setw(5)
-              << slot->offset << " | length=" << std::setw(5) << slot->length
-              << " | deleted=" << (slot->deleted ? "yes" : "no") << '\n';
-  }
-
-  bpm.unpinPage(page_id, false);
 }
 
 // ============================================================
@@ -373,7 +188,7 @@ void printLRU(BufferPoolManager &bpm) {
 }
 
 // ============================================================
-// Flush helpers
+// Flush
 // ============================================================
 
 void flushAllPages(BufferPoolManager &bpm) {
@@ -387,28 +202,497 @@ void flushAllPages(BufferPoolManager &bpm) {
 }
 
 // ============================================================
-// Table operations
+// Primary-index helpers
 // ============================================================
 
-bool insertIntoTable(TableHeap &table, const Schema &schema,
-                     BPlusTree &primary_index) {
-  printTitle("TABLE INSERT");
+bool getPrimaryKeyFromTuple(const Tuple &tuple, const Schema &schema,
+                            const std::string &primary_column, int32_t &key) {
+  size_t column_index{};
 
-  int id = readInt("Enter id: ");
-
-  if (id < 0) {
-    std::cout << "\n[FAILED] Primary key must be non-negative.\n";
+  if (!findColumnIndex(schema, primary_column, column_index)) {
     return false;
   }
 
-  std::string name = readString("Enter name: ");
+  Value value = tuple.getValue(schema, column_index);
 
-  Tuple tuple = Tuple::Serialize(
-      {
-          Value(static_cast<int32_t>(id)),
-          Value(name),
-      },
-      schema);
+  if (value.getType() != TypeId::INTEGER) {
+    return false;
+  }
+
+  key = value.getInteger();
+  return true;
+}
+
+void buildIndex(TableHeap &table, const Schema &schema, BPlusTree &index,
+                size_t column_index) {
+  int indexed = 0;
+  int duplicates = 0;
+  int failed = 0;
+
+  for (auto it = table.begin(); it != table.end(); ++it) {
+    Tuple tuple = *it;
+    RID rid = it.getRID();
+
+    Value value = tuple.getValue(schema, column_index);
+
+    bool inserted = false;
+
+    if (value.getType() == TypeId::INTEGER) {
+      inserted = index.insert(Key::Integer(value.getInteger()), rid);
+    } else if (value.getType() == TypeId::VARCHAR) {
+      inserted = index.insert(Key::Varchar(value.getString()), rid);
+    } else {
+      ++failed;
+      continue;
+    }
+
+    if (inserted) {
+      ++indexed;
+    } else {
+      ++duplicates;
+    }
+  }
+
+  std::cout << "Indexed rows : " << indexed << '\n';
+  std::cout << "Duplicates   : " << duplicates << '\n';
+
+  if (failed > 0) {
+    std::cout << "Unsupported   : " << failed << '\n';
+  }
+}
+
+bool buildPrimaryIndex(TableHeap &table, const Schema &schema,
+                       BPlusTree &primary_index,
+                       const std::string &primary_column) {
+  size_t column_index{};
+
+  if (!findColumnIndex(schema, primary_column, column_index)) {
+    std::cout << "[FAILED] Primary column not found.\n";
+    return false;
+  }
+
+  if (schema.getColumn(column_index).type != TypeId::INTEGER) {
+    std::cout << "[FAILED] Primary key must currently be INTEGER.\n";
+    return false;
+  }
+
+  int indexed = 0;
+  int duplicates = 0;
+  int invalid = 0;
+
+  for (auto it = table.begin(); it != table.end(); ++it) {
+    Tuple tuple = *it;
+    RID rid = it.getRID();
+
+    Value value = tuple.getValue(schema, column_index);
+
+    if (value.getType() != TypeId::INTEGER) {
+      ++invalid;
+      continue;
+    }
+
+    if (primary_index.insert(Key::Integer(value.getInteger()), rid)) {
+      ++indexed;
+    } else {
+      ++duplicates;
+    }
+  }
+
+  std::cout << "Indexed rows : " << indexed << '\n';
+  std::cout << "Duplicates   : " << duplicates << '\n';
+
+  if (invalid > 0) {
+    std::cout << "Invalid rows : " << invalid << '\n';
+  }
+
+  return duplicates == 0 && invalid == 0;
+}
+
+// ============================================================
+// Table creation
+// ============================================================
+
+TableCreationInfo createTableSchemaInteractive() {
+  std::vector<Column> columns;
+
+  printTitle("CREATE TABLE SCHEMA");
+
+  int column_count{};
+
+  while (true) {
+    column_count = readInt("Number of columns: ");
+
+    if (column_count > 0) {
+      break;
+    }
+
+    std::cout << "[FAILED] Table must have at least one column.\n";
+  }
+
+  for (int i = 0; i < column_count; ++i) {
+    std::cout << "\nColumn " << (i + 1) << '\n';
+
+    std::string name;
+
+    while (true) {
+      name = readString("Column name: ");
+
+      if (name.empty()) {
+        std::cout << "[FAILED] Column name cannot be empty.\n";
+        continue;
+      }
+
+      bool duplicate = false;
+
+      for (const Column &column : columns) {
+        if (column.name == name) {
+          duplicate = true;
+          break;
+        }
+      }
+
+      if (duplicate) {
+        std::cout << "[FAILED] Column already exists.\n";
+        continue;
+      }
+
+      break;
+    }
+
+    std::cout << "\n";
+    std::cout << "  1. INTEGER\n";
+    std::cout << "  2. VARCHAR\n";
+
+    int type_choice{};
+
+    while (true) {
+      type_choice = readInt("Type: ");
+
+      if (type_choice == 1 || type_choice == 2) {
+        break;
+      }
+
+      std::cout << "[FAILED] Invalid type.\n";
+    }
+
+    TypeId type = type_choice == 1 ? TypeId::INTEGER : TypeId::VARCHAR;
+
+    columns.push_back({name, type});
+  }
+
+  std::cout << "\nSchema:\n";
+
+  for (const Column &column : columns) {
+    std::cout << "  " << column.name << ' ';
+
+    if (column.type == TypeId::INTEGER) {
+      std::cout << "INTEGER";
+    } else if (column.type == TypeId::VARCHAR) {
+      std::cout << "VARCHAR";
+    }
+
+    std::cout << '\n';
+  }
+
+  std::cout << "\nPrimary key column:\n";
+
+  for (size_t i = 0; i < columns.size(); ++i) {
+    std::cout << "  " << (i + 1) << ". " << columns[i].name << ' ';
+
+    if (columns[i].type == TypeId::INTEGER) {
+      std::cout << "INTEGER";
+    } else {
+      std::cout << "VARCHAR";
+    }
+
+    std::cout << '\n';
+  }
+
+  int primary_choice{};
+
+  while (true) {
+    primary_choice = readInt("Choose primary key column: ");
+
+    if (primary_choice >= 1 &&
+        primary_choice <= static_cast<int>(columns.size())) {
+      break;
+    }
+
+    std::cout << "[FAILED] Invalid column.\n";
+  }
+
+  const Column &primary_column = columns[primary_choice - 1];
+
+  if (primary_column.type != TypeId::INTEGER) {
+    std::cout << "\n[FAILED] Primary key must currently be INTEGER.\n";
+    return createTableSchemaInteractive();
+  }
+
+  return {Schema(columns), primary_column.name};
+}
+
+// ============================================================
+// Open a table and all of its indexes
+// ============================================================
+
+bool openTable(Catalog &catalog, BufferPoolManager &bpm,
+               const std::string &table_name, TableMetadata *&current_meta,
+               std::unique_ptr<TableHeap> &current_table,
+               Schema &current_schema, std::string &current_primary_column,
+               std::unique_ptr<BPlusTree> &current_primary_index,
+               std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+                   &current_secondary_indexes) {
+
+  TableMetadata *meta = catalog.getTable(table_name);
+
+  if (meta == nullptr) {
+    std::cout << "\n[FAILED] Table '" << table_name << "' does not exist.\n";
+    return false;
+  }
+
+  current_meta = meta;
+  current_schema = schemaFromMetadata(*meta);
+
+  const std::string primary_index_name = table_name + "_pk";
+  IndexMetadata *primary_meta = catalog.getIndex(primary_index_name);
+
+  // ----------------------------------------------------------
+  // Find the primary column from persisted metadata.
+  // ----------------------------------------------------------
+
+  if (primary_meta != nullptr && !primary_meta->column_name.empty()) {
+    current_primary_column = primary_meta->column_name;
+  } else {
+    // Compatibility fallback for older databases.
+    current_primary_column = "id";
+
+    if (!isIntegerPrimaryColumn(current_schema, current_primary_column)) {
+      std::cout << "[FAILED] Could not determine the primary key column.\n";
+      return false;
+    }
+  }
+
+  if (!isIntegerPrimaryColumn(current_schema, current_primary_column)) {
+    std::cout << "[FAILED] Primary key column '" << current_primary_column
+              << "' is missing or is not INTEGER.\n";
+    return false;
+  }
+
+  // ----------------------------------------------------------
+  // Table heap
+  // ----------------------------------------------------------
+
+  current_table = std::make_unique<TableHeap>(&bpm, meta->first_page_id);
+
+  // ----------------------------------------------------------
+  // Primary index
+  // ----------------------------------------------------------
+
+  if (primary_meta != nullptr &&
+      primary_meta->root_page_id != INVALID_PAGE_ID) {
+
+    current_primary_index =
+        std::make_unique<BPlusTree>(&bpm, primary_meta->root_page_id);
+
+  } else {
+    current_primary_index = std::make_unique<BPlusTree>(&bpm);
+
+    std::cout << "\nBuilding primary index '" << primary_index_name << "'...\n";
+
+    buildPrimaryIndex(*current_table, current_schema, *current_primary_index,
+                      current_primary_column);
+
+    if (primary_meta == nullptr) {
+      primary_meta = catalog.createIndex(primary_index_name, table_name,
+                                         current_primary_column,
+                                         current_primary_index->getRootId());
+
+      if (primary_meta == nullptr) {
+        std::cerr << "[ERROR] Could not create primary index metadata.\n";
+        current_primary_index.reset();
+        current_table.reset();
+        current_meta = nullptr;
+        return false;
+      }
+    } else {
+      if (!catalog.updateIndexRoot(primary_index_name,
+                                   current_primary_index->getRootId())) {
+        std::cerr << "[ERROR] Could not persist primary index root.\n";
+        return false;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Root persistence callback
+  // ----------------------------------------------------------
+
+  current_primary_index->setRootChangeCallback(
+      [&catalog, primary_index_name](page_id_t new_root_id) {
+        if (!catalog.updateIndexRoot(primary_index_name, new_root_id)) {
+          std::cerr << "[ERROR] Failed to persist root for index '"
+                    << primary_index_name << "'.\n";
+        }
+      });
+
+  // ----------------------------------------------------------
+  // Secondary indexes
+  // ----------------------------------------------------------
+
+  current_secondary_indexes.clear();
+
+  const std::vector<IndexMetadata *> indexes =
+      catalog.getIndexesForTable(table_name);
+
+  for (IndexMetadata *index_meta : indexes) {
+    if (index_meta == nullptr) {
+      continue;
+    }
+
+    if (index_meta->name == primary_index_name) {
+      continue;
+    }
+
+    if (index_meta->root_page_id == INVALID_PAGE_ID) {
+      continue;
+    }
+
+    if (index_meta->column_name.empty()) {
+      continue;
+    }
+
+    size_t column_index{};
+
+    if (!findColumnIndex(current_schema, index_meta->column_name,
+                         column_index)) {
+      std::cerr << "[WARNING] Ignoring index '" << index_meta->name
+                << "': column no longer exists.\n";
+      continue;
+    }
+
+    auto index = std::make_unique<BPlusTree>(&bpm, index_meta->root_page_id);
+
+    const std::string index_name = index_meta->name;
+    const std::string column_name = index_meta->column_name;
+
+    index->setRootChangeCallback([&catalog, index_name](page_id_t new_root_id) {
+      if (!catalog.updateIndexRoot(index_name, new_root_id)) {
+        std::cerr << "[ERROR] Failed to persist root for index '" << index_name
+                  << "'.\n";
+      }
+    });
+
+    current_secondary_indexes[column_name] = std::move(index);
+
+    std::cout << "[INDEX] Loaded '" << index_name << "' on column '"
+              << column_name << "'.\n";
+  }
+
+  return true;
+}
+
+// ============================================================
+// Rebuild primary index
+// ============================================================
+
+bool rebuildPrimaryIndex(Catalog &catalog, BufferPoolManager &bpm,
+                         TableMetadata *meta, TableHeap &table,
+                         const Schema &schema,
+                         const std::string &primary_column,
+                         std::unique_ptr<BPlusTree> &primary_index) {
+
+  if (meta == nullptr) {
+    return false;
+  }
+
+  if (!isIntegerPrimaryColumn(schema, primary_column)) {
+    std::cout << "[FAILED] Primary key must be an INTEGER column.\n";
+    return false;
+  }
+
+  printTitle("REBUILD PRIMARY INDEX");
+
+  auto rebuilt = std::make_unique<BPlusTree>(&bpm);
+
+  const std::string index_name = meta->name + "_pk";
+
+  if (!buildPrimaryIndex(table, schema, *rebuilt, primary_column)) {
+    std::cout << "[FAILED] Index rebuild encountered invalid or duplicate "
+                 "keys.\n";
+    return false;
+  }
+
+  if (!catalog.updateIndexRoot(index_name, rebuilt->getRootId())) {
+    std::cerr << "[ERROR] Failed to persist rebuilt index root.\n";
+    return false;
+  }
+
+  rebuilt->setRootChangeCallback([&catalog, index_name](page_id_t new_root_id) {
+    if (!catalog.updateIndexRoot(index_name, new_root_id)) {
+      std::cerr << "[ERROR] Failed to persist root for index '" << index_name
+                << "'.\n";
+    }
+  });
+
+  primary_index = std::move(rebuilt);
+
+  std::cout << "\n[SUCCESS] Primary index rebuilt.\n";
+  std::cout << "New root page: " << primary_index->getRootId() << '\n';
+
+  return true;
+}
+
+// ============================================================
+// Table insert
+// ============================================================
+
+bool insertIntoTable(TableHeap &table, const Schema &schema,
+                     BPlusTree &primary_index,
+                     const std::string &primary_column) {
+  printTitle("TABLE INSERT");
+
+  std::vector<Value> values;
+  values.reserve(schema.getColumnCount());
+
+  int32_t primary_key{};
+
+  for (size_t i = 0; i < schema.getColumnCount(); ++i) {
+    const Column &column = schema.getColumn(i);
+
+    std::cout << "\nColumn: " << column.name << '\n';
+
+    if (column.type == TypeId::INTEGER) {
+      int32_t value = static_cast<int32_t>(readInt("Enter INTEGER value: "));
+
+      if (column.name == primary_column) {
+        primary_key = value;
+      }
+
+      values.emplace_back(value);
+    } else if (column.type == TypeId::VARCHAR) {
+      values.emplace_back(readString("Enter VARCHAR value: "));
+    } else {
+      std::cout << "[FAILED] Unsupported column type.\n";
+      return false;
+    }
+  }
+
+  RID existing_rid{};
+
+  if (primary_index.search(Key::Integer(primary_key), &existing_rid)) {
+    Tuple existing_tuple;
+
+    if (table.getTuple(existing_rid, &existing_tuple)) {
+      std::cout << "\n[FAILED] Primary key already exists.\n";
+      return false;
+    }
+
+    std::cout << "\n[WARNING] Found a stale primary-index entry. "
+                 "Rebuild the index before inserting this key.\n";
+    return false;
+  }
+
+  Tuple tuple = Tuple::Serialize(values, schema);
 
   RID rid{};
 
@@ -417,21 +701,22 @@ bool insertIntoTable(TableHeap &table, const Schema &schema,
     return false;
   }
 
-  if (!primary_index.insert(static_cast<uint32_t>(id), rid)) {
-
-    std::cout << "\n[FAILED] Index insertion failed.\n";
-
-    // The tuple has already been inserted.
-    // A complete DB would need transactional rollback here.
+  if (!primary_index.insert(Key::Integer(primary_key), rid)) {
+    std::cout << "\n[FAILED] Primary index insertion failed.\n";
+    std::cout << "The tuple was inserted, but is not indexed.\n";
     return false;
   }
 
   std::cout << "\n[SUCCESS]\n";
-  std::cout << "ID  = " << id << '\n';
+  std::cout << "Primary key = " << primary_key << '\n';
   std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
 
   return true;
 }
+
+// ============================================================
+// Get tuple by RID
+// ============================================================
 
 bool getFromTable(TableHeap &table, const Schema &schema) {
   printTitle("TABLE GET");
@@ -439,7 +724,8 @@ bool getFromTable(TableHeap &table, const Schema &schema) {
   int page_id = readInt("Enter page ID: ");
   int slot_num = readInt("Enter slot number: ");
 
-  if (page_id < 0 || slot_num < 0) {
+  if (page_id < 0 || slot_num < 0 ||
+      slot_num > std::numeric_limits<uint16_t>::max()) {
     std::cout << "[FAILED] Invalid RID.\n";
     return false;
   }
@@ -467,8 +753,13 @@ bool getFromTable(TableHeap &table, const Schema &schema) {
   return true;
 }
 
+// ============================================================
+// Generic table update
+// ============================================================
+
 bool updateInTable(TableHeap &table, const Schema &schema,
-                   BPlusTree &primary_index) {
+                   BPlusTree &primary_index,
+                   const std::string &primary_column) {
   printTitle("TABLE UPDATE");
 
   int id = readInt("Enter primary key: ");
@@ -480,32 +771,67 @@ bool updateInTable(TableHeap &table, const Schema &schema,
 
   RID rid{};
 
-  if (!primary_index.search(static_cast<uint32_t>(id), &rid)) {
-
+  if (!primary_index.search(Key::Integer(id), &rid)) {
     std::cout << "\n[NOT FOUND] Primary key does not exist.\n";
     return false;
   }
 
-  std::string name = readString("Enter new name: ");
+  Tuple old_tuple;
 
-  Tuple tuple = Tuple::Serialize(
-      {
-          Value(static_cast<int32_t>(id)),
-          Value(name),
-      },
-      schema);
+  if (!table.getTuple(rid, &old_tuple)) {
+    std::cout << "\n[FAILED] Primary index points to a missing tuple.\n";
+    return false;
+  }
 
-  if (!table.updateTuple(rid, tuple)) {
+  std::vector<Value> values;
+  values.reserve(schema.getColumnCount());
+
+  for (size_t i = 0; i < schema.getColumnCount(); ++i) {
+    const Column &column = schema.getColumn(i);
+
+    if (column.name == primary_column) {
+      values.emplace_back(static_cast<int32_t>(id));
+      continue;
+    }
+
+    std::cout << "\nColumn: " << column.name << '\n';
+
+    if (column.type == TypeId::INTEGER) {
+      values.emplace_back(
+          static_cast<int32_t>(readInt("Enter new INTEGER value: ")));
+    } else if (column.type == TypeId::VARCHAR) {
+      values.emplace_back(readString("Enter new VARCHAR value: "));
+    } else {
+      std::cout << "[FAILED] Unsupported column type.\n";
+      return false;
+    }
+  }
+
+  Tuple new_tuple = Tuple::Serialize(values, schema);
+
+  if (!table.updateTuple(rid, new_tuple)) {
     std::cout << "\n[FAILED] Update failed.\n";
     return false;
   }
 
   std::cout << "\n[SUCCESS] Tuple updated.\n";
+  std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
 
   return true;
 }
 
-bool deleteFromTable(TableHeap &table, BPlusTree &primary_index) {
+// ============================================================
+// Delete
+//
+// The current BPlusTree API has no delete() operation. Therefore,
+// after deleting a tuple we rebuild the primary index so it does
+// not retain a stale RID.
+// ============================================================
+
+bool deleteFromTable(Catalog &catalog, BufferPoolManager &bpm,
+                     TableMetadata *meta, TableHeap &table,
+                     const Schema &schema, const std::string &primary_column,
+                     std::unique_ptr<BPlusTree> &primary_index) {
   printTitle("TABLE DELETE");
 
   int id = readInt("Enter primary key: ");
@@ -517,9 +843,15 @@ bool deleteFromTable(TableHeap &table, BPlusTree &primary_index) {
 
   RID rid{};
 
-  if (!primary_index.search(static_cast<uint32_t>(id), &rid)) {
-
+  if (!primary_index->search(Key::Integer(id), &rid)) {
     std::cout << "\n[NOT FOUND] Primary key does not exist.\n";
+    return false;
+  }
+
+  Tuple tuple;
+
+  if (!table.getTuple(rid, &tuple)) {
+    std::cout << "\n[FAILED] Primary index contains a stale RID.\n";
     return false;
   }
 
@@ -531,23 +863,26 @@ bool deleteFromTable(TableHeap &table, BPlusTree &primary_index) {
   std::cout << "\n[SUCCESS] Tuple deleted from table.\n";
   std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
 
-  // NOTE:
-  // Current BPlusTree implementation has no delete().
-  // Therefore the index entry remains.
-  //
-  // This means deleting a row currently leaves a stale
-  // primary-index entry.
-  //
-  // Search detects the RID but table.getTuple() will fail.
-
-  std::cout << "\n[WARNING] B+Tree deletion is not implemented yet.\n";
-  std::cout << "The index entry for this key remains.\n";
+  // No B+Tree::delete() exists in the current API, so rebuild it.
+  if (!rebuildPrimaryIndex(catalog, bpm, meta, table, schema, primary_column,
+                           primary_index)) {
+    std::cout << "[WARNING] The tuple was deleted, but the primary index "
+                 "could not be rebuilt.\n";
+  }
 
   return true;
 }
 
-void insertDummyRows(TableHeap &table, const Schema &schema,
-                     BPlusTree &primary_index, const std::string &table_name) {
+// ============================================================
+// Dummy rows
+// ============================================================
+
+void insertDummyRows(
+    TableHeap &table, const Schema &schema, BPlusTree &primary_index,
+    const std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+        &secondary_indexes,
+    const std::string &table_name, const std::string &primary_column) {
+
   printTitle("INSERT DUMMY ROWS");
 
   int count = readInt("How many rows? ");
@@ -557,42 +892,116 @@ void insertDummyRows(TableHeap &table, const Schema &schema,
     return;
   }
 
+  size_t primary_column_index{};
+
+  if (!findColumnIndex(schema, primary_column, primary_column_index)) {
+    std::cout << "[FAILED] Primary column does not exist.\n";
+    return;
+  }
+
+  if (schema.getColumn(primary_column_index).type != TypeId::INTEGER) {
+    std::cout << "[FAILED] Dummy insertion currently requires an INTEGER "
+                 "primary key.\n";
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // Cache secondary-index column positions.
+  // ----------------------------------------------------------
+
+  std::vector<std::pair<size_t, BPlusTree *>> secondary_indexes_by_column;
+
+  for (const auto &[column_name, index] : secondary_indexes) {
+    size_t column_index{};
+
+    if (findColumnIndex(schema, column_name, column_index)) {
+      secondary_indexes_by_column.push_back({column_index, index.get()});
+    }
+  }
+
   auto start = std::chrono::steady_clock::now();
 
   int inserted = 0;
 
   for (int i = 0; i < count; ++i) {
-    int id = i + 1;
+    int32_t id = i + 1;
 
-    RID existing{};
+    // Skip existing primary keys instead of creating duplicate rows.
+    RID existing_rid{};
 
-    if (primary_index.search(static_cast<uint32_t>(id), &existing)) {
+    if (primary_index.search(Key::Integer(id), &existing_rid)) {
       continue;
     }
 
-    std::string name = table_name + "_" + std::to_string(id);
-    int32_t age = 18 + (id % 50);
-    Tuple tuple = Tuple::Serialize(
-        {
-            Value(static_cast<int32_t>(id)),
-            Value(name),
-            Value(static_cast<int32_t>(age)),
-        },
-        schema);
+    std::vector<Value> values;
+    values.reserve(schema.getColumnCount());
+
+    for (size_t column = 0; column < schema.getColumnCount(); ++column) {
+      const Column &column_info = schema.getColumn(column);
+
+      if (column_info.type == TypeId::INTEGER) {
+        if (column == primary_column_index) {
+          values.emplace_back(id);
+        } else {
+          values.emplace_back(static_cast<int32_t>(18 + (id % 50)));
+        }
+      } else if (column_info.type == TypeId::VARCHAR) {
+        values.emplace_back(table_name + "_" + column_info.name + "_" +
+                            std::to_string(id));
+      } else {
+        values.clear();
+        break;
+      }
+    }
+
+    if (values.empty()) {
+      std::cout << "[FAILED] Unsupported column type.\n";
+      break;
+    }
+
+    Tuple tuple = Tuple::Serialize(values, schema);
 
     RID rid{};
 
     if (!table.insertTuple(tuple, &rid)) {
-      std::cout << "[FAILED] Could not insert ID " << id << '\n';
+      std::cout << "[FAILED] table.insertTuple ID " << id << '\n';
       continue;
     }
 
-    if (!primary_index.insert(static_cast<uint32_t>(id), rid)) {
-      std::cout << "[FAILED] Index insertion failed for ID " << id << '\n';
+    if (!primary_index.insert(Key::Integer(id), rid)) {
+      std::cout << "[FAILED] primary_index.insert ID " << id << '\n';
       continue;
     }
 
-    ++inserted;
+    bool secondary_ok = true;
+
+    for (const auto &[column_index, index] : secondary_indexes_by_column) {
+      Value value = tuple.getValue(schema, column_index);
+
+      bool ok = false;
+
+      if (value.getType() == TypeId::INTEGER) {
+        ok = index->insert(Key::Integer(value.getInteger()), rid);
+      } else if (value.getType() == TypeId::VARCHAR) {
+        ok = index->insert(Key::Varchar(value.getString()), rid);
+      }
+
+      if (!ok) {
+        secondary_ok = false;
+
+        std::cout << "[WARNING] Failed to update secondary index for "
+                  << schema.getColumn(column_index).name << ", ID " << id
+                  << '\n';
+      }
+    }
+
+    if (secondary_ok) {
+      ++inserted;
+    }
+
+    if (i % 100 == 0) {
+      std::cout << "Processed: " << i << '\n';
+    }
   }
 
   auto end = std::chrono::steady_clock::now();
@@ -601,13 +1010,17 @@ void insertDummyRows(TableHeap &table, const Schema &schema,
       std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
   std::cout << "\nInserted: " << inserted << " rows.\n";
-  std::cout << "Time: " << elapsed.count() << " µs\n";
+  std::cout << "Time: " << elapsed.count() << " us\n";
   std::cout << "Time: " << elapsed.count() / 1000.0 << " ms\n";
   std::cout << "Average: "
             << (inserted ? elapsed.count() / static_cast<double>(inserted)
                          : 0.0)
-            << " µs/row\n";
+            << " us/row\n";
 }
+
+// ============================================================
+// Table visualization
+// ============================================================
 
 void visualizeTable(TableHeap &table, const Schema &schema) {
   printTitle("TABLE VISUALIZATION");
@@ -615,12 +1028,10 @@ void visualizeTable(TableHeap &table, const Schema &schema) {
   int count = 0;
 
   for (auto it = table.begin(); it != table.end(); ++it) {
-
     Tuple tuple = *it;
     RID rid = it.getRID();
 
     std::cout << '\n';
-
     std::cout << "Row " << count << '\n';
 
     printBorder();
@@ -633,17 +1044,17 @@ void visualizeTable(TableHeap &table, const Schema &schema) {
   }
 
   printBorder();
-
   std::cout << "Total rows: " << count << '\n';
 }
 
 // ============================================================
 // Catalog visualization
 // ============================================================
+
 void visualizeCatalog(Catalog &catalog) {
   printTitle("CATALOG");
 
-  std::vector<std::string> table_names = catalog.getAllTableNames();
+  const std::vector<std::string> table_names = catalog.getAllTableNames();
 
   if (table_names.empty()) {
     std::cout << "No known tables.\n";
@@ -661,75 +1072,113 @@ void visualizeCatalog(Catalog &catalog) {
     printBorder();
 
     std::cout << "ID          : " << meta->table_id << '\n';
-
     std::cout << "Name        : " << meta->name << '\n';
-
     std::cout << "First page  : " << meta->first_page_id << '\n';
-
     std::cout << "Columns     : " << meta->columns.size() << '\n';
 
     for (const Column &column : meta->columns) {
-      std::cout << "  - " << column.name << '\n';
-    }
+      std::cout << "  - " << column.name;
 
-    // --------------------------------------------------------
-    // Indexes for this table
-    // --------------------------------------------------------
+      if (column.type == TypeId::INTEGER) {
+        std::cout << " INTEGER";
+      } else if (column.type == TypeId::VARCHAR) {
+        std::cout << " VARCHAR";
+      }
+
+      std::cout << '\n';
+    }
 
     std::vector<IndexMetadata *> indexes = catalog.getIndexesForTable(name);
 
     if (indexes.empty()) {
-      std::cout << "Indexes     : (none built yet)\n";
+      std::cout << "Indexes     : (none)\n";
     } else {
       std::cout << "Indexes     : " << indexes.size() << '\n';
+
       for (IndexMetadata *idx : indexes) {
-        std::cout << "  - " << idx->name << " (root=" << idx->root_page_id
-                  << ")\n";
+        if (idx == nullptr) {
+          continue;
+        }
+
+        std::cout << "  - " << idx->name << " column=" << idx->column_name
+                  << " root=" << idx->root_page_id << '\n';
       }
     }
   }
 }
+
 // ============================================================
-// Primary index
+// Detailed table information
 // ============================================================
 
-void buildPrimaryIndex(TableHeap &table, const Schema &schema,
-                       BPlusTree &primary_index) {
-  printTitle("BUILD PRIMARY INDEX");
+void showAllTablesDetailed(Catalog &catalog, BufferPoolManager &bpm) {
+  printTitle("ALL TABLES (DETAILED)");
 
-  int indexed = 0;
-  int duplicates = 0;
+  const std::vector<std::string> table_names = catalog.getAllTableNames();
 
-  for (auto it = table.begin(); it != table.end(); ++it) {
-
-    Tuple tuple = *it;
-    RID rid = it.getRID();
-
-    Value id_value = tuple.getValue(schema, 0);
-
-    if (id_value.getType() != TypeId::INTEGER) {
-      continue;
-    }
-
-    int32_t id = id_value.getInteger();
-
-    if (id < 0) {
-      continue;
-    }
-
-    if (!primary_index.insert(static_cast<uint32_t>(id), rid)) {
-
-      ++duplicates;
-      continue;
-    }
-
-    ++indexed;
+  if (table_names.empty()) {
+    std::cout << "No known tables.\n";
+    return;
   }
 
-  std::cout << "Indexed rows : " << indexed << '\n';
+  for (const std::string &name : table_names) {
+    TableMetadata *meta = catalog.getTable(name);
 
-  std::cout << "Duplicates   : " << duplicates << '\n';
+    if (meta == nullptr) {
+      continue;
+    }
+
+    std::cout << '\n';
+    printBorder();
+    std::cout << "TABLE: " << meta->name << '\n';
+    printBorder();
+
+    std::cout << "Table ID     : " << meta->table_id << '\n';
+    std::cout << "First page   : " << meta->first_page_id << '\n';
+    std::cout << "Columns      : " << meta->columns.size() << '\n';
+
+    for (const Column &column : meta->columns) {
+      std::cout << "  - " << column.name;
+
+      if (column.type == TypeId::INTEGER) {
+        std::cout << " INTEGER";
+      } else if (column.type == TypeId::VARCHAR) {
+        std::cout << " VARCHAR";
+      }
+
+      std::cout << '\n';
+    }
+
+    TableHeap scratch_heap(&bpm, meta->first_page_id);
+
+    int row_count = 0;
+
+    for (auto it = scratch_heap.begin(); it != scratch_heap.end(); ++it) {
+      ++row_count;
+    }
+
+    std::cout << "Row count    : " << row_count << '\n';
+
+    const std::string index_name = name + "_pk";
+    IndexMetadata *index_meta = catalog.getIndex(index_name);
+
+    if (index_meta != nullptr) {
+      std::cout << "Primary index: " << index_name << '\n';
+      std::cout << "  Column     : " << index_meta->column_name << '\n';
+      std::cout << "  Root page  : " << index_meta->root_page_id << '\n';
+    } else {
+      std::cout << "Primary index: (none built yet)\n";
+    }
+  }
+
+  std::cout << '\n';
+  printBorder();
+  std::cout << "Total tables: " << table_names.size() << '\n';
 }
+
+// ============================================================
+// Primary-key search
+// ============================================================
 
 void searchByPrimaryKey(TableHeap &table, const Schema &schema,
                         BPlusTree &primary_index) {
@@ -746,27 +1195,22 @@ void searchByPrimaryKey(TableHeap &table, const Schema &schema,
 
   auto index_start = std::chrono::steady_clock::now();
 
-  bool found = primary_index.search(static_cast<uint32_t>(id), &rid);
+  bool found = primary_index.search(Key::Integer(id), &rid);
 
   auto index_end = std::chrono::steady_clock::now();
 
-  auto index_time = std::chrono::duration_cast<std::chrono::microseconds>(
+  const auto index_time = std::chrono::duration_cast<std::chrono::microseconds>(
       index_end - index_start);
 
   if (!found) {
     std::cout << "\n[NOT FOUND]\n";
-
     std::cout << "Primary key " << id << " does not exist.\n";
-
-    std::cout << "\nB+Tree search time: " << index_time.count() << " ns\n";
-
+    std::cout << "B+Tree search time: " << index_time.count() << " us\n";
     return;
   }
 
   std::cout << "\n[FOUND]\n";
-
   std::cout << "Primary key = " << id << '\n';
-
   std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
 
   Tuple tuple;
@@ -777,292 +1221,30 @@ void searchByPrimaryKey(TableHeap &table, const Schema &schema,
 
   auto table_end = std::chrono::steady_clock::now();
 
-  auto table_time = std::chrono::duration_cast<std::chrono::microseconds>(
+  const auto table_time = std::chrono::duration_cast<std::chrono::microseconds>(
       table_end - table_start);
 
   if (!tuple_found) {
-    std::cout << "\n[ERROR]\n";
-    std::cout << "Index points to a missing tuple.\n";
-
-    std::cout << "\nB+Tree search time: " << index_time.count() << " ns\n";
-
-    std::cout << "Table lookup time: " << table_time.count() << " ns\n";
-
+    std::cout << "\n[ERROR] Index points to a missing tuple.\n";
+    std::cout << "B+Tree search time: " << index_time.count() << " us\n";
+    std::cout << "Table lookup time: " << table_time.count() << " us\n";
     return;
   }
 
   printBorder();
-
   printTupleValues(tuple, schema);
-
   printBorder();
 
-  std::cout << "\nB+Tree search time : " << index_time.count() << " ns\n";
-
-  std::cout << "Table lookup time  : " << table_time.count() << " ns\n";
-
+  std::cout << "\nB+Tree search time : " << index_time.count() << " us\n";
+  std::cout << "Table lookup time  : " << table_time.count() << " us\n";
   std::cout << "Total time         : " << (index_time + table_time).count()
-            << " ns\n";
+            << " us\n";
 }
 
 // ============================================================
-// Table creation / opening
+// Primary-key range search
 // ============================================================
 
-TableMetadata *openOrCreateUsers(Catalog &catalog, const Schema &schema) {
-  std::string table_name = "users";
-
-  TableMetadata *meta = catalog.getTable(table_name);
-
-  if (meta != nullptr) {
-    return meta;
-  }
-
-  std::cout << "\nCreating table 'users'...\n";
-
-  meta = catalog.createTable(table_name, schema);
-
-  if (meta == nullptr) {
-    std::cout << "[FAILED] Could not create users table.\n";
-    return nullptr;
-  }
-
-  std::cout << "[SUCCESS] users table created.\n";
-
-  return meta;
-}
-
-TableMetadata *createTableInteractive(Catalog &catalog) {
-  printTitle("CREATE TABLE");
-
-  std::string table_name = readString("Enter table name: ");
-
-  if (table_name.empty()) {
-    std::cout << "[FAILED] Table name cannot be empty.\n";
-    return nullptr;
-  }
-
-  if (catalog.getTable(table_name) != nullptr) {
-    std::cout << "[FAILED] Table already exists.\n";
-    return nullptr;
-  }
-
-  std::cout << "\nFor now, tables use the default schema:\n";
-  std::cout << "  id   INTEGER\n";
-  std::cout << "  name VARCHAR\n";
-
-  Schema schema = createSchema();
-
-  TableMetadata *meta = catalog.createTable(table_name, schema);
-
-  if (meta == nullptr) {
-    std::cout << "\n[FAILED] Could not create table.\n";
-    return nullptr;
-  }
-
-  std::cout << "\n[SUCCESS]\n";
-  std::cout << "Table ID     : " << meta->table_id << '\n';
-
-  std::cout << "First page   : " << meta->first_page_id << '\n';
-
-  return meta;
-}
-// ============================================================
-// Open / create a table and its primary index
-// ============================================================
-
-bool openTable(Catalog &catalog, BufferPoolManager &bpm,
-               const std::string &table_name, TableMetadata *&current_meta,
-               std::unique_ptr<TableHeap> &current_table,
-               Schema &current_schema,
-               std::unique_ptr<BPlusTree> &current_primary_index) {
-
-  TableMetadata *meta = catalog.getTable(table_name);
-
-  if (meta == nullptr) {
-    std::cout << "\n[FAILED] Table '" << table_name << "' does not exist.\n";
-    return false;
-  }
-
-  // ----------------------------------------------------------
-  // All tables currently use the same schema
-  // ----------------------------------------------------------
-
-  current_schema = createSchema();
-
-  current_meta = meta;
-
-  current_table = std::make_unique<TableHeap>(&bpm, meta->first_page_id);
-
-  // ----------------------------------------------------------
-  // Every table has its own primary index
-  //
-  // users    -> users_pk
-  // products -> products_pk
-  // etc.
-  // ----------------------------------------------------------
-
-  const std::string index_name = table_name + "_pk";
-
-  IndexMetadata *index_meta = catalog.getIndex(index_name);
-
-  // ----------------------------------------------------------
-  // Existing index
-  // ----------------------------------------------------------
-
-  if (index_meta != nullptr) {
-
-    current_primary_index =
-        std::make_unique<BPlusTree>(&bpm, index_meta->root_page_id);
-  }
-
-  // ----------------------------------------------------------
-  // No index metadata -> create/rebuild it
-  // ----------------------------------------------------------
-
-  else {
-
-    current_primary_index = std::make_unique<BPlusTree>(&bpm);
-
-    buildPrimaryIndex(*current_table, current_schema, *current_primary_index);
-
-    index_meta = catalog.createIndex(index_name, table_name, "id",
-                                     current_primary_index->getRootId());
-    if (index_meta == nullptr) {
-      std::cerr << "[ERROR] Could not create primary index for table '"
-                << table_name << "'.\n";
-
-      current_primary_index.reset();
-      current_table.reset();
-      current_meta = nullptr;
-
-      return false;
-    }
-  }
-
-  // ----------------------------------------------------------
-  // Persist root changes for THIS table's index
-  // ----------------------------------------------------------
-
-  current_primary_index->setRootChangeCallback(
-      [&catalog, index_name](page_id_t new_root_id) {
-        if (!catalog.updateIndexRoot(index_name, new_root_id)) {
-
-          std::cerr << "[ERROR] Failed to persist root for index '"
-                    << index_name << "'.\n";
-        }
-      });
-
-  return true;
-}
-// ============================================================
-// Menu
-// ============================================================
-
-void printMenu() {
-  std::cout << '\n';
-
-  printLine('=');
-  std::cout << "                    WALOUDB\n";
-  printLine('=');
-
-  std::cout << "\nRAW STORAGE\n";
-  std::cout << "  1. Create new page\n";
-  std::cout << "  2. Inspect page\n";
-  std::cout << "  3. Insert raw tuple\n";
-  std::cout << "  4. Read raw tuple\n";
-  std::cout << "  5. Delete raw tuple\n";
-  std::cout << "  6. Compact page\n";
-  std::cout << "  7. Visualize page\n";
-
-  std::cout << "\nBUFFER POOL\n";
-  std::cout << " 10. Show buffer pool\n";
-  std::cout << " 11. Show LRU\n";
-
-  std::cout << "\nDISK\n";
-  std::cout << " 13. Flush known pages\n";
-
-  std::cout << "\nTABLE\n";
-  std::cout << " 14. Insert into table\n";
-  std::cout << " 15. Get tuple by RID\n";
-  std::cout << " 16. Update tuple\n";
-  std::cout << " 17. Delete tuple\n";
-  std::cout << " 18. Insert dummy rows\n";
-  std::cout << " 19. Visualize table\n";
-  std::cout << " 20. Create/open table\n";
-  std::cout << " 21. Visualize catalog\n";
-
-  std::cout << "\nINDEX\n";
-  std::cout << " 22. Search by primary key\n";
-  std::cout << " 23. Rebuild primary index\n";
-  std::cout << " 24. Show all tables (detailed)\n";
-  std::cout << " 25. Range search by primary key\n";
-  std::cout << " 26. Make a secondary index\n";
-  std::cout << " 27. Range search by secondary key\n";
-
-  std::cout << "\n";
-  std::cout << "  0. Exit\n";
-
-  printLine('=');
-}
-// ============================================================
-// Show all tables (detailed)
-// ============================================================
-
-void showAllTablesDetailed(Catalog &catalog, BufferPoolManager &bpm) {
-  printTitle("ALL TABLES (DETAILED)");
-
-  std::vector<std::string> table_names = catalog.getAllTableNames();
-
-  if (table_names.empty()) {
-    std::cout << "No known tables.\n";
-    return;
-  }
-
-  for (const std::string &name : table_names) {
-    TableMetadata *meta = catalog.getTable(name);
-    if (meta == nullptr)
-      continue;
-
-    std::cout << '\n';
-    printBorder();
-    std::cout << "TABLE: " << meta->name << '\n';
-    printBorder();
-
-    std::cout << "Table ID     : " << meta->table_id << '\n';
-    std::cout << "First page   : " << meta->first_page_id << '\n';
-    std::cout << "Columns      : " << meta->columns.size() << '\n';
-    for (const Column &column : meta->columns) {
-      std::cout << "  - " << column.name << '\n';
-    }
-
-    TableHeap scratch_heap(&bpm, meta->first_page_id);
-    int row_count = 0;
-    for (auto it = scratch_heap.begin(); it != scratch_heap.end(); ++it) {
-      ++row_count;
-    }
-    std::cout << "Row count    : " << row_count << '\n';
-
-    const std::string index_name = name + "_pk";
-    IndexMetadata *index_meta = catalog.getIndex(index_name);
-    if (index_meta != nullptr) {
-      std::cout << "Primary index: " << index_name << '\n';
-      std::cout << "  Root page  : " << index_meta->root_page_id << '\n';
-    } else {
-      std::cout << "Primary index: (none built yet)\n";
-    }
-  }
-
-  std::cout << '\n';
-  printBorder();
-  std::cout << "Total tables: " << table_names.size() << '\n';
-}
-// ============================================================
-// Main
-// ============================================================
-// ============================================================
-// Main
-// ============================================================
 void rangeSearchByPrimaryKey(TableHeap &table, const Schema &schema,
                              BPlusTree &primary_index) {
   printTitle("PRIMARY KEY RANGE SEARCH");
@@ -1079,12 +1261,12 @@ void rangeSearchByPrimaryKey(TableHeap &table, const Schema &schema,
 
   auto start = std::chrono::steady_clock::now();
 
-  bool ok = primary_index.rangeSearch(static_cast<uint32_t>(low),
-                                      static_cast<uint32_t>(high), &entries);
+  bool ok = primary_index.rangeSearch(Key::Integer(low), Key::Integer(high),
+                                      &entries);
 
   auto end = std::chrono::steady_clock::now();
 
-  auto elapsed =
+  const auto elapsed =
       std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
   if (!ok) {
@@ -1096,59 +1278,464 @@ void rangeSearchByPrimaryKey(TableHeap &table, const Schema &schema,
 
   printBorder();
 
-  for (const Entry &e : entries) {
-
+  for (const Entry &entry : entries) {
     Tuple tuple;
 
-    if (!table.getTuple(e.rid, &tuple)) {
-      std::cout << "Key " << e.key << " -> [MISSING TUPLE]\n";
+    if (!table.getTuple(entry.rid, &tuple)) {
+      std::cout << "[WARNING] Could not fetch RID (" << entry.rid.page_id
+                << ", " << entry.rid.slot_num << ")\n";
       continue;
     }
 
-    std::cout << "Key " << e.key << " -> RID(" << e.rid.page_id << ", "
-              << e.rid.slot_num << ")\n";
+    std::cout << "Key ";
+
+    if (entry.key.type == KeyType::INTEGER) {
+      std::cout << entry.key.integer;
+    } else {
+      std::cout << '"' << entry.key.string << '"';
+    }
+
+    std::cout << " -> RID(" << entry.rid.page_id << ", " << entry.rid.slot_num
+              << ")\n";
 
     printTupleValues(tuple, schema);
-
     printBorder();
   }
 
-  std::cout << "\nRange scan time: " << elapsed.count() << " µs\n";
+  std::cout << "\nRange scan time: " << elapsed.count() << " us\n";
 }
-void buildIndex(TableHeap &table, const Schema &schema, BPlusTree &index,
-                size_t column_index) {
 
-  int indexed = 0;
-  int duplicates = 0;
+// ============================================================
+// LIKE helper
+// ============================================================
 
-  for (auto it = table.begin(); it != table.end(); ++it) {
+bool likeMatch(const std::string &text, const std::string &pattern) {
+  size_t text_pos = 0;
+  size_t pattern_pos = 0;
 
-    Tuple tuple = *it;
-    RID rid = it.getRID();
+  size_t star_pos = std::string::npos;
+  size_t match_pos = 0;
 
-    Value key_value = tuple.getValue(schema, column_index);
-
-    if (key_value.getType() != TypeId::INTEGER) {
+  while (text_pos < text.size()) {
+    if (pattern_pos < pattern.size() &&
+        (pattern[pattern_pos] == '_' ||
+         pattern[pattern_pos] == text[text_pos])) {
+      ++text_pos;
+      ++pattern_pos;
       continue;
     }
 
-    int32_t key = key_value.getInteger();
-
-    if (key < 0) {
+    if (pattern_pos < pattern.size() && pattern[pattern_pos] == '%') {
+      star_pos = pattern_pos;
+      match_pos = text_pos;
+      ++pattern_pos;
       continue;
     }
 
-    if (!index.insert(static_cast<uint32_t>(key), rid)) {
-      ++duplicates;
+    if (star_pos != std::string::npos) {
+      pattern_pos = star_pos + 1;
+      ++match_pos;
+      text_pos = match_pos;
       continue;
     }
 
-    ++indexed;
+    return false;
   }
 
-  std::cout << "Indexed rows : " << indexed << '\n';
-  std::cout << "Duplicates   : " << duplicates << '\n';
+  while (pattern_pos < pattern.size() && pattern[pattern_pos] == '%') {
+    ++pattern_pos;
+  }
+
+  return pattern_pos == pattern.size();
 }
+
+// ============================================================
+// VARCHAR search using secondary index
+// ============================================================
+
+void searchVarchar(
+    TableHeap &table, const Schema &schema,
+    const std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+        &indexes) {
+
+  printTitle("VARCHAR SEARCH");
+
+  std::string column_name = readString("Column name: ");
+
+  auto index_it = indexes.find(column_name);
+
+  if (index_it == indexes.end()) {
+    std::cout << "\n[FAILED] No secondary index on '" << column_name << "'.\n";
+    return;
+  }
+
+  size_t column_index{};
+
+  if (!findColumnIndex(schema, column_name, column_index)) {
+    std::cout << "\n[FAILED] Column does not exist.\n";
+    return;
+  }
+
+  if (schema.getColumn(column_index).type != TypeId::VARCHAR) {
+    std::cout << "\n[FAILED] This operation requires a VARCHAR column.\n";
+    return;
+  }
+
+  BPlusTree &index = *index_it->second;
+
+  std::cout << "\nSearch type:\n";
+  std::cout << "  1. Exact (=)\n";
+  std::cout << "  2. Prefix LIKE (text%)\n";
+
+  int choice = readInt("Choice: ");
+
+  if (choice != 1 && choice != 2) {
+    std::cout << "[FAILED] Invalid choice.\n";
+    return;
+  }
+
+  std::string value = readString("Value: ");
+
+  if (choice == 1) {
+    auto start = std::chrono::steady_clock::now();
+
+    RID rid{};
+    bool found = index.search(Key::Varchar(value), &rid);
+
+    auto end = std::chrono::steady_clock::now();
+
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+    std::cout << "\nSearch time: " << elapsed.count() << " us\n";
+
+    if (!found) {
+      std::cout << "\n[NOT FOUND]\n";
+      return;
+    }
+
+    Tuple tuple;
+
+    if (!table.getTuple(rid, &tuple)) {
+      std::cout << "\n[ERROR] Index contains stale RID.\n";
+      return;
+    }
+
+    std::cout << "\n[FOUND]\n";
+    std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
+
+    printBorder();
+    printTupleValues(tuple, schema);
+    printBorder();
+
+    return;
+  }
+
+  if (value.empty() || value.back() != '%') {
+    std::cout << "\n[FAILED] Prefix LIKE must end with '%'.\n";
+    std::cout << "Example: Slim%\n";
+    return;
+  }
+
+  std::string prefix = value.substr(0, value.size() - 1);
+
+  if (prefix.empty()) {
+    std::cout << "\n[FAILED] Prefix cannot be empty.\n";
+    return;
+  }
+
+  // Build an exclusive upper bound for the byte-wise prefix range.
+  std::string upper = prefix;
+  bool incremented = false;
+
+  for (int i = static_cast<int>(upper.size()) - 1; i >= 0; --i) {
+    unsigned char c = static_cast<unsigned char>(upper[static_cast<size_t>(i)]);
+
+    if (c != 0xFF) {
+      upper[static_cast<size_t>(i)] = static_cast<char>(c + 1);
+      upper.resize(static_cast<size_t>(i + 1));
+      incremented = true;
+      break;
+    }
+  }
+
+  if (!incremented) {
+    std::cout << "\n[FAILED] Could not construct prefix range.\n";
+    return;
+  }
+
+  std::vector<Entry> entries;
+
+  auto start = std::chrono::steady_clock::now();
+
+  bool success =
+      index.rangeSearch(Key::Varchar(prefix), Key::Varchar(upper), &entries);
+
+  auto end = std::chrono::steady_clock::now();
+
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+  std::cout << "\nSearch time: " << elapsed.count() << " us\n";
+
+  if (!success) {
+    std::cout << "[FAILED] Range search failed.\n";
+    return;
+  }
+
+  int displayed = 0;
+
+  for (const Entry &entry : entries) {
+    Tuple tuple;
+
+    if (!table.getTuple(entry.rid, &tuple)) {
+      std::cout << "[WARNING] Stale RID (" << entry.rid.page_id << ", "
+                << entry.rid.slot_num << ")\n";
+      continue;
+    }
+
+    // rangeSearch is assumed to be inclusive, so explicitly filter
+    // the upper-bound key and anything else outside the prefix.
+    Value indexed_value = tuple.getValue(schema, column_index);
+
+    if (indexed_value.getType() != TypeId::VARCHAR ||
+        indexed_value.getString().compare(0, prefix.size(), prefix) != 0) {
+      continue;
+    }
+
+    std::cout << "RID = (" << entry.rid.page_id << ", " << entry.rid.slot_num
+              << ")\n";
+
+    printTupleValues(tuple, schema);
+    printBorder();
+
+    ++displayed;
+  }
+
+  if (displayed == 0) {
+    std::cout << "[NOT FOUND]\n";
+  } else {
+    std::cout << "Displayed: " << displayed << " row(s).\n";
+  }
+}
+
+// ============================================================
+// Secondary-index range search
+// ============================================================
+
+void rangeSearchSecondary(
+    TableHeap &table, const Schema &schema,
+    const std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+        &indexes) {
+
+  printTitle("SECONDARY INDEX RANGE SEARCH");
+
+  std::string column_name = readString("Indexed column name: ");
+
+  auto index_it = indexes.find(column_name);
+
+  if (index_it == indexes.end()) {
+    std::cout << "[FAILED] No secondary index on '" << column_name << "'.\n";
+    return;
+  }
+
+  size_t column_index{};
+
+  if (!findColumnIndex(schema, column_name, column_index)) {
+    std::cout << "[FAILED] Column does not exist.\n";
+    return;
+  }
+
+  const Column &column = schema.getColumn(column_index);
+
+  int32_t low_int{};
+  int32_t high_int{};
+
+  std::vector<Entry> entries;
+
+  if (column.type == TypeId::INTEGER) {
+    low_int = static_cast<int32_t>(readInt("Enter minimum: "));
+    high_int = static_cast<int32_t>(readInt("Enter maximum: "));
+
+    if (low_int > high_int) {
+      std::cout << "[FAILED] Minimum cannot be greater than maximum.\n";
+      return;
+    }
+
+    auto start = std::chrono::steady_clock::now();
+
+    bool success = index_it->second->rangeSearch(
+        Key::Integer(low_int), Key::Integer(high_int), &entries);
+
+    auto end = std::chrono::steady_clock::now();
+
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+    std::cout << "\nSearch time: " << elapsed.count() << " us\n";
+
+    if (!success) {
+      std::cout << "[FAILED] Range search failed.\n";
+      return;
+    }
+  } else if (column.type == TypeId::VARCHAR) {
+    std::string low = readString("Enter lower string: ");
+    std::string high = readString("Enter upper string: ");
+
+    if (low > high) {
+      std::cout << "[FAILED] Lower bound cannot be greater than upper "
+                   "bound.\n";
+      return;
+    }
+
+    auto start = std::chrono::steady_clock::now();
+
+    bool success = index_it->second->rangeSearch(Key::Varchar(low),
+                                                 Key::Varchar(high), &entries);
+
+    auto end = std::chrono::steady_clock::now();
+
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+    std::cout << "\nSearch time: " << elapsed.count() << " us\n";
+
+    if (!success) {
+      std::cout << "[FAILED] Range search failed.\n";
+      return;
+    }
+  } else {
+    std::cout << "[FAILED] Unsupported column type.\n";
+    return;
+  }
+
+  std::cout << "Index returned " << entries.size() << " entries.\n\n";
+
+  for (const Entry &entry : entries) {
+    Tuple tuple;
+
+    if (!table.getTuple(entry.rid, &tuple)) {
+      std::cout << "[WARNING] Could not fetch RID (" << entry.rid.page_id
+                << ", " << entry.rid.slot_num << ")\n";
+      continue;
+    }
+
+    std::cout << "RID: (" << entry.rid.page_id << ", " << entry.rid.slot_num
+              << ")\n";
+
+    printTupleValues(tuple, schema);
+    printBorder();
+  }
+}
+
+// ============================================================
+// Secondary-index creation
+// ============================================================
+
+bool createSecondaryIndex(
+    Catalog &catalog, BufferPoolManager &bpm, TableMetadata *meta,
+    TableHeap &table, const Schema &schema,
+    std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+        &secondary_indexes) {
+
+  if (meta == nullptr) {
+    return false;
+  }
+
+  printTitle("CREATE SECONDARY INDEX");
+
+  std::string column_name = readString("Enter column name to index: ");
+
+  size_t column_index{};
+
+  if (!findColumnIndex(schema, column_name, column_index)) {
+    std::cout << "[FAILED] Column '" << column_name << "' not found.\n";
+    return false;
+  }
+
+  const std::string index_name = meta->name + "_" + column_name + "_idx";
+
+  if (catalog.getIndex(index_name) != nullptr) {
+    std::cout << "[FAILED] Index '" << index_name << "' already exists.\n";
+    return false;
+  }
+
+  auto index = std::make_unique<BPlusTree>(&bpm);
+
+  buildIndex(table, schema, *index, column_index);
+
+  IndexMetadata *index_meta = catalog.createIndex(
+      index_name, meta->name, column_name, index->getRootId());
+
+  if (index_meta == nullptr) {
+    std::cout << "[FAILED] Could not create index metadata.\n";
+    return false;
+  }
+
+  index->setRootChangeCallback([&catalog, index_name](page_id_t new_root_id) {
+    if (!catalog.updateIndexRoot(index_name, new_root_id)) {
+      std::cerr << "[ERROR] Failed to persist root for index '" << index_name
+                << "'.\n";
+    }
+  });
+
+  secondary_indexes[column_name] = std::move(index);
+
+  std::cout << "\n[SUCCESS] Created secondary index.\n";
+  std::cout << "Index  : " << index_name << '\n';
+  std::cout << "Column : " << column_name << '\n';
+  std::cout << "Root   : " << index_meta->root_page_id << '\n';
+
+  return true;
+}
+
+// ============================================================
+// Menu
+// ============================================================
+
+void printMenu() {
+  std::cout << '\n';
+
+  printLine('=');
+  std::cout << "                    WALOUDB\n";
+  printLine('=');
+
+  std::cout << "\nBUFFER POOL\n";
+  std::cout << " 10. Show buffer pool\n";
+  std::cout << " 11. Show LRU\n";
+
+  std::cout << "\nDISK\n";
+  std::cout << " 13. Flush known pages\n";
+
+  std::cout << "\nTABLE\n";
+  std::cout << " 14. Insert into table\n";
+  std::cout << " 15. Get tuple by RID\n";
+  std::cout << " 16. Update tuple\n";
+  std::cout << " 17. Delete tuple\n";
+  std::cout << " 18. Insert dummy rows\n";
+  std::cout << " 19. Visualize table\n";
+  std::cout << " 20. Create / switch table\n";
+  std::cout << " 21. Visualize catalog\n";
+
+  std::cout << "\nINDEX\n";
+  std::cout << " 22. Search by primary key\n";
+  std::cout << " 23. Rebuild primary index\n";
+  std::cout << " 24. Show all tables (detailed)\n";
+  std::cout << " 25. Range search by primary key\n";
+  std::cout << " 26. Make a secondary index\n";
+  std::cout << " 27. Range search by secondary key\n";
+  std::cout << " 28. Search VARCHAR (= / LIKE)\n";
+
+  std::cout << "\n";
+  std::cout << "  0. Exit\n";
+
+  printLine('=');
+}
+
+// ============================================================
+// Main
+// ============================================================
+
 int main() {
   std::cout << R"(
 ============================================================
@@ -1162,56 +1749,46 @@ int main() {
   // ----------------------------------------------------------
 
   DiskManager disk_manager(DATABASE_FILE);
-
   BufferPoolManager bpm(BUFFER_POOL_SIZE, &disk_manager);
-
   Catalog catalog(&bpm);
 
   // ----------------------------------------------------------
-  // Runtime state
-  //
-  // These always represent the table we are currently
-  // working with.
+  // Current table state
   // ----------------------------------------------------------
 
   TableMetadata *current_meta = nullptr;
 
   std::unique_ptr<TableHeap> current_table;
+  Schema current_schema;
 
-  Schema current_schema = createSchema();
+  std::string current_primary_column;
 
   std::unique_ptr<BPlusTree> current_primary_index;
+
   std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
       current_secondary_indexes;
+
   // ----------------------------------------------------------
-  // Known pages
+  // Default table.
   //
-  // Used only by the playground's raw page visualization.
-  // ----------------------------------------------------------
-
-  std::vector<page_id_t> known_pages;
-
-  known_pages.push_back(0);
-
-  // ----------------------------------------------------------
-  // Open or create default table
-  //
-  // We start with "users", but users has no special meaning.
+  // If this database is new, create a simple users table.
+  // Existing databases keep their persisted schema.
   // ----------------------------------------------------------
 
   TableMetadata *users_meta = catalog.getTable("users");
 
   if (users_meta == nullptr) {
-
     std::cout << "\nCreating default table 'users'...\n";
 
-    Schema schema = createSchema();
+    Schema default_schema({
+        {"id", TypeId::INTEGER},
+        {"name", TypeId::VARCHAR},
+    });
 
-    users_meta = catalog.createTable("users", schema);
+    users_meta = catalog.createTable("users", default_schema);
 
     if (users_meta == nullptr) {
       std::cerr << "\nFatal error: could not create users table.\n";
-
       return 1;
     }
 
@@ -1219,504 +1796,266 @@ int main() {
   }
 
   // ----------------------------------------------------------
-  // Keep users in the known table list
-  // ----------------------------------------------------------
-
-  if (users_meta->first_page_id != INVALID_PAGE_ID) {
-    known_pages.push_back(users_meta->first_page_id);
-  }
-
-  // ----------------------------------------------------------
-  // Open users
-  //
-  // This also loads/creates users_pk.
+  // Open users.
   // ----------------------------------------------------------
 
   if (!openTable(catalog, bpm, "users", current_meta, current_table,
-                 current_schema, current_primary_index)) {
-
+                 current_schema, current_primary_column, current_primary_index,
+                 current_secondary_indexes)) {
     std::cerr << "\nFatal error: could not open users table.\n";
-
     return 1;
   }
 
   // ----------------------------------------------------------
-  // Main menu
+  // Main loop
   // ----------------------------------------------------------
 
   bool running = true;
 
   while (running) {
-
     printMenu();
 
-    // --------------------------------------------------------
-    // Current table information
-    // --------------------------------------------------------
-
-    std::cout << "\n";
+    std::cout << '\n';
     printLine('-');
 
-    std::cout << "Current table : " << current_meta->name << '\n';
-
-    std::cout << "Table ID      : " << current_meta->table_id << '\n';
-
-    std::cout << "First page    : " << current_meta->first_page_id << '\n';
-
-    std::cout << "Primary index : " << current_meta->name << "_pk\n";
+    if (current_meta != nullptr) {
+      std::cout << "Current table : " << current_meta->name << '\n';
+      std::cout << "Table ID      : " << current_meta->table_id << '\n';
+      std::cout << "First page    : " << current_meta->first_page_id << '\n';
+      std::cout << "Primary key   : " << current_primary_column << '\n';
+      std::cout << "Primary index : " << current_meta->name << "_pk\n";
+    } else {
+      std::cout << "Current table : (none)\n";
+    }
 
     printLine('-');
 
     int choice = readInt("WalouDB >> ");
 
     switch (choice) {
-
-      // ======================================================
+      // ========================================================
       // EXIT
-      // ======================================================
+      // ========================================================
 
-    case 0: {
+    case 0:
       running = false;
       break;
-    }
 
-      // ======================================================
-      // RAW STORAGE
-      // ======================================================
-
-    case 1: {
-      createNewPage(bpm, known_pages);
-
-      break;
-    }
-
-    case 2: {
-      int page_id = readInt("Enter page ID: ");
-
-      if (page_id < 0) {
-        std::cout << "Invalid page ID.\n";
-
-        break;
-      }
-
-      switchActivePage(bpm, static_cast<page_id_t>(page_id));
-
-      break;
-    }
-
-    case 3: {
-      int page_id = readInt("Enter page ID: ");
-
-      if (page_id < 0) {
-        std::cout << "Invalid page ID.\n";
-
-        break;
-      }
-
-      insertTupleRaw(bpm, static_cast<page_id_t>(page_id));
-
-      break;
-    }
-
-    case 4: {
-      int page_id = readInt("Enter page ID: ");
-
-      if (page_id < 0) {
-        std::cout << "Invalid page ID.\n";
-
-        break;
-      }
-
-      getTupleRaw(bpm, static_cast<page_id_t>(page_id));
-
-      break;
-    }
-
-    case 5: {
-      int page_id = readInt("Enter page ID: ");
-
-      if (page_id < 0) {
-        std::cout << "Invalid page ID.\n";
-
-        break;
-      }
-
-      deleteTupleRaw(bpm, static_cast<page_id_t>(page_id));
-
-      break;
-    }
-
-    case 6: {
-      int page_id = readInt("Enter page ID: ");
-
-      if (page_id < 0) {
-        std::cout << "Invalid page ID.\n";
-
-        break;
-      }
-
-      compactActivePage(bpm, static_cast<page_id_t>(page_id));
-
-      break;
-    }
-
-    case 7: {
-      int page_id = readInt("Enter page ID: ");
-
-      if (page_id < 0) {
-        std::cout << "Invalid page ID.\n";
-
-        break;
-      }
-
-      visualizeActivePage(bpm, static_cast<page_id_t>(page_id));
-
-      break;
-    }
-
-      // ======================================================
+      // ========================================================
       // BUFFER POOL
-      // ======================================================
+      // ========================================================
 
-    case 10: {
+    case 10:
       printBufferPool(bpm);
       break;
-    }
 
-    case 11: {
+    case 11:
       printLRU(bpm);
       break;
-    }
 
-      // ======================================================
+      // ========================================================
       // DISK
-      // ======================================================
+      // ========================================================
 
-    case 13: {
+    case 13:
       flushAllPages(bpm);
       break;
-    }
 
-      // ======================================================
+      // ========================================================
       // TABLE
-      // ======================================================
+      // ========================================================
 
-    case 14: {
-
-      insertIntoTable(*current_table, current_schema, *current_primary_index);
-
+    case 14:
+      if (current_table && current_primary_index) {
+        insertIntoTable(*current_table, current_schema, *current_primary_index,
+                        current_primary_column);
+      }
       break;
-    }
 
-    case 15: {
-
-      getFromTable(*current_table, current_schema);
-
+    case 15:
+      if (current_table) {
+        getFromTable(*current_table, current_schema);
+      }
       break;
-    }
 
-    case 16: {
-
-      updateInTable(*current_table, current_schema, *current_primary_index);
-
+    case 16:
+      if (current_table && current_primary_index) {
+        updateInTable(*current_table, current_schema, *current_primary_index,
+                      current_primary_column);
+      }
       break;
-    }
 
-    case 17: {
-
-      deleteFromTable(*current_table, *current_primary_index);
-
+    case 17:
+      if (current_table && current_primary_index) {
+        deleteFromTable(catalog, bpm, current_meta, *current_table,
+                        current_schema, current_primary_column,
+                        current_primary_index);
+      }
       break;
-    }
 
-    case 18: {
-
-      insertDummyRows(*current_table, current_schema, *current_primary_index,
-                      current_meta->name);
-
+    case 18:
+      if (current_table && current_primary_index) {
+        insertDummyRows(*current_table, current_schema, *current_primary_index,
+                        current_secondary_indexes, current_meta->name,
+                        current_primary_column);
+      }
       break;
-    }
 
-    case 19: {
-
-      visualizeTable(*current_table, current_schema);
-
+    case 19:
+      if (current_table) {
+        visualizeTable(*current_table, current_schema);
+      }
       break;
-    }
 
-      // ======================================================
+      // ========================================================
       // CREATE / SWITCH TABLE
-      // ======================================================
+      // ========================================================
 
     case 20: {
-
-      printTitle("OPEN / CREATE TABLE");
-
       std::string table_name = readString("Enter table name: ");
 
       if (table_name.empty()) {
-
         std::cout << "[FAILED] Table name cannot be empty.\n";
-
         break;
       }
 
-      // ------------------------------------------------------
-      // Existing table
-      //
-      // Simply switch to it.
-      // ------------------------------------------------------
-
-      TableMetadata *existing = catalog.getTable(table_name);
-
-      if (existing != nullptr) {
-
+      if (catalog.getTable(table_name) != nullptr) {
+        // Existing table: switch to it.
         if (openTable(catalog, bpm, table_name, current_meta, current_table,
-                      current_schema, current_primary_index)) {
-
+                      current_schema, current_primary_column,
+                      current_primary_index, current_secondary_indexes)) {
           std::cout << "\n[SUCCESS] Switched to table '" << table_name
                     << "'.\n";
-
-          std::cout << "Primary index: " << table_name << "_pk\n";
         }
 
         break;
       }
 
-      // ------------------------------------------------------
-      // New table
-      //
-      // Every table gets the same schema.
-      // ------------------------------------------------------
+      // New table.
+      TableCreationInfo creation = createTableSchemaInteractive();
 
-      std::cout << "\nTable '" << table_name << "' does not exist.\n";
+      TableMetadata *meta = catalog.createTable(table_name, creation.schema);
 
-      std::cout << "Creating table with schema:\n";
-
-      std::cout << "  id   INTEGER\n";
-
-      std::cout << "  name VARCHAR\n";
-
-      Schema schema = createSchema();
-
-      TableMetadata *new_meta = catalog.createTable(table_name, schema);
-
-      if (new_meta == nullptr) {
-
-        std::cout << "\n[FAILED] Could not create table.\n";
-
+      if (meta == nullptr) {
+        std::cout << "[FAILED] Could not create table.\n";
         break;
       }
 
-      // ------------------------------------------------------
-      // Add to known table list
-      // ------------------------------------------------------
+      auto table = std::make_unique<TableHeap>(&bpm, meta->first_page_id);
 
-      if (new_meta->first_page_id != INVALID_PAGE_ID) {
+      auto primary_index = std::make_unique<BPlusTree>(&bpm);
 
-        known_pages.push_back(new_meta->first_page_id);
-      }
+      std::cout << "\nBuilding primary index...\n";
 
-      // ------------------------------------------------------
-      // Immediately switch to the new table
-      //
-      // openTable() also creates its primary index.
-      // ------------------------------------------------------
-
-      if (!openTable(catalog, bpm, table_name, current_meta, current_table,
-                     current_schema, current_primary_index)) {
-
-        std::cout << "\n[FAILED] Table was created, "
-                     "but could not be opened.\n";
-
+      if (!buildPrimaryIndex(*table, creation.schema, *primary_index,
+                             creation.primary_column)) {
+        std::cout << "[FAILED] Could not build primary index.\n";
         break;
       }
 
-      std::cout << "\n[SUCCESS] Created and switched to table '" << table_name
-                << "'.\n";
+      const std::string index_name = table_name + "_pk";
 
-      std::cout << "Table ID      : " << current_meta->table_id << '\n';
+      IndexMetadata *primary_meta =
+          catalog.createIndex(index_name, table_name, creation.primary_column,
+                              primary_index->getRootId());
 
-      std::cout << "First page    : " << current_meta->first_page_id << '\n';
-
-      std::cout << "Primary index : " << table_name << "_pk\n";
-
-      break;
-    }
-
-      // ======================================================
-      // CATALOG
-      // ======================================================
-
-    case 21: {
-
-      visualizeCatalog(catalog);
-
-      break;
-    }
-
-      // ======================================================
-      // PRIMARY INDEX
-      // ======================================================
-
-    case 22: {
-
-      searchByPrimaryKey(*current_table, current_schema,
-                         *current_primary_index);
-
-      break;
-    }
-
-    case 23: {
-
-      printTitle("REBUILD PRIMARY INDEX");
-
-      const std::string index_name = current_meta->name + "_pk";
-
-      // ------------------------------------------------------
-      // Create completely fresh B+Tree
-      // ------------------------------------------------------
-
-      current_primary_index = std::make_unique<BPlusTree>(&bpm);
-
-      // ------------------------------------------------------
-      // Rebuild from current table
-      // ------------------------------------------------------
-
-      buildPrimaryIndex(*current_table, current_schema, *current_primary_index);
-
-      // ------------------------------------------------------
-      // Persist new root
-      // ------------------------------------------------------
-
-      if (!catalog.updateIndexRoot(index_name,
-                                   current_primary_index->getRootId())) {
-
-        std::cerr << "[ERROR] Failed to persist rebuilt "
-                     "index root.\n";
-
+      if (primary_meta == nullptr) {
+        std::cout << "[FAILED] Could not create primary index metadata.\n";
         break;
       }
 
-      // ------------------------------------------------------
-      // Restore root-change callback
-      // ------------------------------------------------------
-
-      current_primary_index->setRootChangeCallback(
+      primary_index->setRootChangeCallback(
           [&catalog, index_name](page_id_t new_root_id) {
             if (!catalog.updateIndexRoot(index_name, new_root_id)) {
-
-              std::cerr << "[ERROR] Failed to persist root "
-                           "for index '"
+              std::cerr << "[ERROR] Failed to persist root for index '"
                         << index_name << "'.\n";
             }
           });
 
-      std::cout << "\n[SUCCESS] Rebuilt primary index for table '"
-                << current_meta->name << "'.\n";
+      current_meta = meta;
+      current_schema = creation.schema;
+      current_primary_column = creation.primary_column;
+      current_table = std::move(table);
+      current_primary_index = std::move(primary_index);
+      current_secondary_indexes.clear();
 
-      std::cout << "New root page: " << current_primary_index->getRootId()
-                << '\n';
-
+      std::cout << "\n[SUCCESS] Created and opened table '" << table_name
+                << "'.\n";
       break;
     }
-    case 24: {
 
+      // ========================================================
+      // CATALOG
+      // ========================================================
+
+    case 21:
+      visualizeCatalog(catalog);
+      break;
+
+      // ========================================================
+      // PRIMARY INDEX
+      // ========================================================
+
+    case 22:
+      if (current_table && current_primary_index) {
+        searchByPrimaryKey(*current_table, current_schema,
+                           *current_primary_index);
+      }
+      break;
+
+    case 23:
+      if (current_table && current_primary_index) {
+        rebuildPrimaryIndex(catalog, bpm, current_meta, *current_table,
+                            current_schema, current_primary_column,
+                            current_primary_index);
+      }
+      break;
+
+    case 24:
       showAllTablesDetailed(catalog, bpm);
-
       break;
-    }
-    case 25: {
-      rangeSearchByPrimaryKey(*current_table, current_schema,
-                              *current_primary_index);
-      break;
-    }
-    case 26: { // "Create secondary index on column"
-      printTitle("CREATE SECONDARY INDEX");
 
-      std::string column_name = readString("Enter column name to index: ");
-
-      // find its position in the schema
-      int col_idx = -1;
-      for (size_t i = 0; i < current_schema.getColumnCount(); ++i) {
-        if (current_schema.getColumn(i).name == column_name) {
-          col_idx = static_cast<int>(i);
-          break;
-        }
-      }
-
-      if (col_idx < 0) {
-        std::cout << "[FAILED] Column '" << column_name << "' not found.\n";
-        break;
-      }
-
-      auto new_index = std::make_unique<BPlusTree>(&bpm);
-      buildIndex(*current_table, current_schema, *new_index,
-                 static_cast<size_t>(col_idx));
-
-      const std::string index_name =
-          current_meta->name + "_" + column_name + "_idx";
-
-      IndexMetadata *meta = catalog.createIndex(
-          index_name, current_meta->name, column_name, new_index->getRootId());
-      // (createIndex would need the column_name param added per point 2)
-
-      new_index->setRootChangeCallback(
-          [&catalog, index_name](page_id_t new_root) {
-            catalog.updateIndexRoot(index_name, new_root);
-          });
-
-      current_secondary_indexes[column_name] = std::move(new_index);
-
-      std::cout << "[SUCCESS] Created index '" << index_name << "'.\n";
-      break;
-    }
-    case 27: { // "Range search by age"
-      auto it = current_secondary_indexes.find("age");
-      if (it == current_secondary_indexes.end()) {
-        std::cout << "[FAILED] No index on 'age' for this table.\n";
-        break;
-      }
-
-      int low = readInt("Enter low age: ");
-      int high = readInt("Enter high age: ");
-
-      std::vector<Entry> entries;
-      it->second->rangeSearch(static_cast<uint32_t>(low),
-                              static_cast<uint32_t>(high), &entries);
-
-      for (const Entry &e : entries) {
-        Tuple tuple;
-        if (current_table->getTuple(e.rid, &tuple)) {
-          printTupleValues(tuple, current_schema);
-          printBorder();
-        }
+    case 25:
+      if (current_table && current_primary_index) {
+        rangeSearchByPrimaryKey(*current_table, current_schema,
+                                *current_primary_index);
       }
       break;
-    }
-      // ======================================================
-      // UNKNOWN COMMAND
-      // ======================================================
 
-    default: {
+    case 26:
+      if (current_table) {
+        createSecondaryIndex(catalog, bpm, current_meta, *current_table,
+                             current_schema, current_secondary_indexes);
+      }
+      break;
 
+    case 27:
+      if (current_table) {
+        rangeSearchSecondary(*current_table, current_schema,
+                             current_secondary_indexes);
+      }
+      break;
+
+    case 28:
+      if (current_table) {
+        searchVarchar(*current_table, current_schema,
+                      current_secondary_indexes);
+      }
+      break;
+
+    default:
       std::cout << "\nUnknown command.\n";
-
       break;
-    }
     }
   }
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // Shutdown
-  // ==========================================================
+  // ----------------------------------------------------------
 
-  std::cout << "\n";
-
+  std::cout << '\n';
   printLine('=');
-
   std::cout << "Shutting down WalouDB...\n";
-
   printLine('=');
 
   flushAllPages(bpm);

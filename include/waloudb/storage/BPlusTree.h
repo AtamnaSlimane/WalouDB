@@ -2,6 +2,7 @@
 
 #include "waloudb/common/Types.h"
 #include "waloudb/storage/BufferPoolManager.h"
+#include "waloudb/storage/Key.h"
 #include "waloudb/storage/SlottedPage.h"
 #include <cstddef>
 #include <cstdint>
@@ -21,10 +22,18 @@ struct NodeHeader {
   page_id_t page_id; // this page's own id — same self-check idea as PageHeader
 };
 
+struct SerializedKey {
+  uint8_t type;
+  uint16_t length;
+  char data[MAX_INDEX_KEY_SIZE];
+};
+
 struct Entry {
-  uint32_t key;
+  Key key;
   RID rid{};
 };
+SerializedKey serializeKey(const Key &key);
+Key deserializeKey(const SerializedKey &data);
 // ============================================================
 // LEAF NODE LAYOUT
 // ============================================================
@@ -66,6 +75,7 @@ struct Entry {
 class LeafNode {
 public:
   explicit LeafNode(char *raw_data) : m_data(raw_data) {}
+
   // for ram
   void Init(page_id_t page_id, page_id_t parent_page_id) {
     NodeHeader *h = getHeader();
@@ -74,44 +84,90 @@ public:
     h->page_type = NodeType::LEAF;
     h->key_count = 0;
     getLeafHeader()->next_leaf_page_id = INVALID_PAGE_ID;
-  };
-  bool findEntry(uint32_t key, RID *out_rid) {
+  }
+
+  bool findEntry(Key key, RID *out_rid) {
     int idx = findKeyIndex(key);
-    if (idx < getKeyCount() && getEntry(idx)->key == key) {
-      *out_rid = getEntry(idx)->rid;
-      return true;
+
+    if (idx >= getKeyCount()) {
+      return false;
     }
-    return false;
+
+    SerializedKey serialized{};
+    std::memcpy(&serialized, entryData(idx), sizeof(SerializedKey));
+
+    Key stored_key = deserializeKey(serialized);
+
+    if (stored_key != key) {
+      return false;
+    }
+
+    RID rid{};
+    std::memcpy(&rid, entryData(idx) + sizeof(SerializedKey), sizeof(RID));
+
+    if (out_rid != nullptr) {
+      *out_rid = rid;
+    }
+
+    return true;
   }
 
   page_id_t getNextLeafId() { return getLeafHeader()->next_leaf_page_id; }
+
   void setNextLeafId(page_id_t id) { getLeafHeader()->next_leaf_page_id = id; }
 
   bool isFull() { return getHeader()->key_count >= maxEntries(); }
+
   page_id_t getId() { return getHeader()->page_id; }
+
   page_id_t getParentId() { return getHeader()->parent_page_id; }
+
   uint16_t getKeyCount() { return getHeader()->key_count; }
+
   void setParentId(page_id_t parent_id) {
     getHeader()->parent_page_id = parent_id;
   }
 
   std::vector<Entry> getAllEntries() {
     std::vector<Entry> output;
+
     uint16_t n = getKeyCount();
     output.reserve(n);
+
     for (uint16_t i = 0; i < n; i++) {
-      output.push_back(*getEntry(i));
+      SerializedKey serialized{};
+
+      std::memcpy(&serialized, entryData(i), sizeof(SerializedKey));
+
+      Key key = deserializeKey(serialized);
+
+      RID rid{};
+
+      std::memcpy(&rid, entryData(i) + sizeof(SerializedKey), sizeof(RID));
+
+      output.push_back(Entry{key, rid});
     }
+
     return output;
   }
+
   bool setEntries(std::vector<Entry> &entries) {
     if (entries.size() > maxEntries()) {
       return false;
     }
+
     for (size_t i = 0; i < entries.size(); i++) {
-      *getEntry(static_cast<int>(i)) = entries[i];
+      SerializedKey serialized = serializeKey(entries[i].key);
+
+      std::memcpy(entryData(static_cast<int>(i)), &serialized,
+                  sizeof(SerializedKey));
+
+      std::memcpy(entryData(static_cast<int>(i)) + sizeof(SerializedKey),
+                  &entries[i].rid, sizeof(RID));
     }
+
     getHeader()->key_count = static_cast<uint16_t>(entries.size());
+
     return true;
   }
 
@@ -119,23 +175,41 @@ public:
     if (isFull()) {
       return false;
     }
+
     int idx = findKeyIndex(entry.key);
     int count = getKeyCount();
 
-    // if (idx < count && getEntry(idx)->key == entry.key) {
-    //   return false; // dupelicate key
+    // if (idx < count && getKey(idx) == entry.key) {
+    //   return false; // duplicate key
     // }
 
     for (int i = count; i > idx; i--) {
-      *getEntry(i) = *getEntry(i - 1);
+      SerializedKey serialized{};
+
+      std::memcpy(&serialized, entryData(i - 1), sizeof(SerializedKey));
+
+      RID rid{};
+
+      std::memcpy(&rid, entryData(i - 1) + sizeof(SerializedKey), sizeof(RID));
+
+      std::memcpy(entryData(i), &serialized, sizeof(SerializedKey));
+
+      std::memcpy(entryData(i) + sizeof(SerializedKey), &rid, sizeof(RID));
     }
-    *getEntry(idx) = entry;
+
+    SerializedKey serialized = serializeKey(entry.key);
+
+    std::memcpy(entryData(idx), &serialized, sizeof(SerializedKey));
+
+    std::memcpy(entryData(idx) + sizeof(SerializedKey), &entry.rid,
+                sizeof(RID));
+
     getHeader()->key_count++;
+
     return true;
   }
 
 private:
-  // linked list style leaves
   struct LeafHeader : NodeHeader {
     page_id_t next_leaf_page_id;
   };
@@ -143,40 +217,56 @@ private:
   char *m_data;
 
   NodeHeader *getHeader() { return reinterpret_cast<NodeHeader *>(m_data); }
+
   const NodeHeader *getHeader() const {
     return reinterpret_cast<const NodeHeader *>(m_data);
   }
 
   LeafHeader *getLeafHeader() { return reinterpret_cast<LeafHeader *>(m_data); }
+
   const LeafHeader *getLeafHeader() const {
     return reinterpret_cast<const LeafHeader *>(m_data);
   }
 
-  Entry *getEntry(int idx) {
-    return reinterpret_cast<Entry *>(m_data + sizeof(LeafHeader) +
-                                     idx * sizeof(Entry));
-  }
-  const Entry *getEntry(int idx) const {
-    return reinterpret_cast<const Entry *>(m_data + sizeof(LeafHeader) +
-                                           idx * sizeof(Entry));
+  char *entryData(int idx) {
+    return m_data + sizeof(LeafHeader) + idx * entrySize();
   }
 
-  int findKeyIndex(uint32_t key) {
+  const char *entryData(int idx) const {
+    return m_data + sizeof(LeafHeader) + idx * entrySize();
+  }
+
+  Key getKey(int idx) {
+    SerializedKey serialized{};
+
+    std::memcpy(&serialized, entryData(idx), sizeof(SerializedKey));
+
+    return deserializeKey(serialized);
+  }
+
+  int findKeyIndex(Key key) {
     int left = 0;
     int right = getHeader()->key_count;
+
     while (left < right) {
       int mid = (left + right) / 2;
-      if (getEntry(mid)->key < key) {
+
+      if (getKey(mid) < key) {
         left = mid + 1;
       } else {
         right = mid;
       }
     }
+
     return left;
   }
 
+  static constexpr size_t entrySize() {
+    return sizeof(SerializedKey) + sizeof(RID);
+  }
+
   static constexpr size_t maxEntries() {
-    return (PAGE_SIZE - sizeof(LeafHeader)) / sizeof(Entry);
+    return (PAGE_SIZE - sizeof(LeafHeader)) / entrySize();
   }
 };
 // ============================================================
@@ -281,39 +371,62 @@ private:
 class InternalNode {
 public:
   explicit InternalNode(char *raw_data) : m_data(raw_data) {}
+
   void Init(page_id_t page_id, page_id_t parent_page_id) {
     NodeHeader *h = getHeader();
     h->page_id = page_id;
     h->parent_page_id = parent_page_id;
     h->page_type = NodeType::INTERNAL;
     h->key_count = 0;
+
     *getChild(0) = INVALID_PAGE_ID;
   }
-  page_id_t findChild(uint32_t key) {
+
+  page_id_t findChild(Key key) {
     auto index = findChildIndex(key);
     return *getChild(index);
   }
 
   bool isFull() { return getHeader()->key_count >= maxKeys(); }
+
   page_id_t getId() { return getHeader()->page_id; }
+
   page_id_t getParentId() { return getHeader()->parent_page_id; }
+
   uint16_t getKeyCount() { return getHeader()->key_count; }
+
   void setParentId(page_id_t parent_page_id) {
     getHeader()->parent_page_id = parent_page_id;
   }
-  bool insertChild(uint32_t key, page_id_t child_id) {
+
+  bool insertChild(Key key, page_id_t child_id) {
     if (isFull()) {
       return false;
     }
+
     int n = getKeyCount();
     int idx = findKeyIndex(key);
+
+    // Shift keys right.
     for (int i = n; i > idx; i--) {
-      *getKey(i) = *getKey(i - 1);
+      SerializedKey serialized{};
+
+      std::memcpy(&serialized, keyData(i - 1), sizeof(SerializedKey));
+
+      std::memcpy(keyData(i), &serialized, sizeof(SerializedKey));
     }
+
+    // Shift children right.
     for (int i = n + 1; i > idx + 1; i--) {
       *getChild(i) = *getChild(i - 1);
     }
-    *getKey(idx) = key;
+
+    // Write new key.
+    SerializedKey serialized = serializeKey(key);
+
+    std::memcpy(keyData(idx), &serialized, sizeof(SerializedKey));
+
+    // Write new right child.
     *getChild(idx + 1) = child_id;
 
     getHeader()->key_count++;
@@ -321,47 +434,65 @@ public:
     return true;
   }
 
-  int findKeyIndex(uint32_t key) {
+  int findKeyIndex(Key key) {
     int left = 0;
     int right = getHeader()->key_count;
+
     while (left < right) {
       int mid = (left + right) / 2;
-      if (*getKey(mid) < key) {
+
+      if (getKey(mid) < key) {
         left = mid + 1;
       } else {
         right = mid;
       }
     }
+
     return left;
   }
+
   void getAllChildrenKeys(std::vector<page_id_t> *children,
-                          std::vector<uint32_t> *keys) {
+                          std::vector<Key> *keys) {
     int n = getKeyCount();
+
     keys->clear();
     children->clear();
+
     keys->reserve(n);
     children->reserve(n + 1);
-    for (int i = 0; i < n; i++)
-      keys->push_back(*getKey(i));
 
-    for (int i = 0; i <= n; i++) // n+1
+    for (int i = 0; i < n; i++) {
+      keys->push_back(getKey(i));
+    }
+
+    for (int i = 0; i <= n; i++) {
       children->push_back(*getChild(i));
+    }
   }
-  bool setAllChildrenKeys(const std::vector<page_id_t> &children,
-                          const std::vector<uint32_t> &keys) {
 
+  bool setAllChildrenKeys(const std::vector<page_id_t> &children,
+                          const std::vector<Key> &keys) {
     if (children.size() != keys.size() + 1) {
       return false;
     }
+
     if (keys.size() > maxKeys()) {
       return false;
     }
-    for (size_t i = 0; i < children.size(); i++)
-      *getChild(i) = children[i];
-    for (size_t i = 0; i < keys.size(); i++)
-      *getKey(i) = keys[i];
+
+    for (size_t i = 0; i < children.size(); i++) {
+      *getChild(static_cast<int>(i)) = children[i];
+    }
+
+    for (size_t i = 0; i < keys.size(); i++) {
+      SerializedKey serialized = serializeKey(keys[i]);
+
+      std::memcpy(keyData(static_cast<int>(i)), &serialized,
+                  sizeof(SerializedKey));
+    }
 
     getHeader()->key_count = static_cast<uint16_t>(keys.size());
+
     return true;
   }
 
@@ -369,58 +500,69 @@ private:
   char *m_data;
 
   NodeHeader *getHeader() { return reinterpret_cast<NodeHeader *>(m_data); }
+
   const NodeHeader *getHeader() const {
     return reinterpret_cast<const NodeHeader *>(m_data);
   }
 
-  uint32_t *getKey(int idx) {
-    return reinterpret_cast<uint32_t *>(
-        m_data + sizeof(NodeHeader) + sizeof(page_id_t) +
-        idx * (sizeof(page_id_t) + sizeof(uint32_t)));
+  Key getKey(int idx) {
+    SerializedKey serialized{};
+
+    std::memcpy(&serialized, keyData(idx), sizeof(SerializedKey));
+
+    return deserializeKey(serialized);
+  }
+
+  char *keyData(int idx) {
+    return m_data + sizeof(NodeHeader) + sizeof(page_id_t) +
+           idx * (sizeof(page_id_t) + sizeof(SerializedKey));
   }
 
   page_id_t *getChild(int idx) {
     char *data = m_data + sizeof(NodeHeader) +
-                 idx * (sizeof(page_id_t) + sizeof(uint32_t));
+                 idx * (sizeof(page_id_t) + sizeof(SerializedKey));
+
     return reinterpret_cast<page_id_t *>(data);
   }
 
   const page_id_t *getChild(int idx) const {
-    char *data = m_data + sizeof(NodeHeader) +
-                 idx * (sizeof(page_id_t) + sizeof(uint32_t));
+    const char *data = m_data + sizeof(NodeHeader) +
+                       idx * (sizeof(page_id_t) + sizeof(SerializedKey));
+
     return reinterpret_cast<const page_id_t *>(data);
   }
 
-  int findChildIndex(uint32_t key) {
+  int findChildIndex(Key key) {
+    int left = 0;
+    int right = getHeader()->key_count;
 
-    int left = 0, right = getHeader()->key_count;
     while (left < right) {
       int mid = (left + right) / 2;
-      if (*getKey(mid) <= key) {
+
+      if (getKey(mid) <= key) {
         left = mid + 1;
       } else {
         right = mid;
       }
     }
+
     return left;
   }
 
   static constexpr size_t maxKeys() {
     return (PAGE_SIZE - sizeof(NodeHeader) - sizeof(page_id_t)) /
-           (sizeof(uint32_t) + sizeof(page_id_t));
+           (sizeof(SerializedKey) + sizeof(page_id_t));
   }
 };
-
 class BPlusTree {
 public:
   explicit BPlusTree(BufferPoolManager *bpm);
   BPlusTree(BufferPoolManager *bpm, page_id_t root_page_id);
 
-  bool search(uint32_t key, RID *out_rid) const;
-  bool insert(uint32_t key, RID rid);
+  bool search(Key key, RID *out_rid) const;
+  bool insert(Key key, RID rid);
   bool split(page_id_t page_id, Entry &entry, page_id_t right_child_id);
-  bool rangeSearch(uint32_t low, uint32_t high,
-                   std::vector<Entry> *out_entries) const;
+  bool rangeSearch(Key low, Key high, std::vector<Entry> *out_entries) const;
 
   page_id_t getRootId() { return m_root_page_id; }
   // bool getValue(uint32_t key, RID *rid);

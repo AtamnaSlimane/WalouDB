@@ -9,4 +9,5 @@ using frame_id_t = uint32_t; // ram
 static constexpr page_id_t INVALID_PAGE_ID = -1;
 static constexpr page_id_t CATALOG_PAGE_ID = 0;
 static constexpr page_id_t INDEX_CATALOG_PAGE_ID = 1;
+constexpr size_t MAX_INDEX_KEY_SIZE = 128;
 } // namespace WalouDB

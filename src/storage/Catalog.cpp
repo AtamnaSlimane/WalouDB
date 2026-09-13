@@ -28,6 +28,7 @@ Schema Catalog::catalogIndexSchema() {
       {"index_id", TypeId::INTEGER},
       {"name", TypeId::VARCHAR},
       {"table_name", TypeId::VARCHAR},
+      {"column_name", TypeId::VARCHAR},
       {"root_page_id", TypeId::INTEGER},
   });
 }
@@ -171,8 +172,9 @@ void Catalog::loadFromDisk() {
     meta.name = row.getValue(schema, 1).getString();
 
     meta.table_name = row.getValue(schema, 2).getString();
+    meta.column_name = row.getValue(schema, 3).getString();
 
-    meta.root_page_id = row.getValue(schema, 3).getInteger();
+    meta.root_page_id = row.getValue(schema, 4).getInteger();
 
     m_indexes[meta.name] = meta;
 
@@ -323,10 +325,10 @@ bool Catalog::updateIndexRoot(const std::string &index_name,
             Value(static_cast<int32_t>(it->second.index_id)),
             Value(it->second.name),
             Value(it->second.table_name),
+            Value(it->second.column_name),
             Value(static_cast<int32_t>(root_page_id)),
         },
         schema);
-
     RID rid = catalog_it.getRID();
 
     if (!m_catalog_index_heap->updateTuple(rid, updated)) {

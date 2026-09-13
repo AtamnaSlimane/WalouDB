@@ -24,7 +24,7 @@ BPlusTree::BPlusTree(BufferPoolManager *bpm) : m_bpm(bpm) {
 BPlusTree::BPlusTree(BufferPoolManager *bpm, page_id_t root_page_id)
     : m_bpm(bpm), m_root_page_id(root_page_id) {}
 
-bool BPlusTree::search(uint32_t key, RID *out_rid) const {
+bool BPlusTree::search(Key key, RID *out_rid) const {
   page_id_t current_id = m_root_page_id;
   while (true) {
     Page *page = m_bpm->fetchPage(current_id);
@@ -55,7 +55,7 @@ bool BPlusTree::search(uint32_t key, RID *out_rid) const {
   }
 }
 
-bool BPlusTree::rangeSearch(uint32_t low, uint32_t high,
+bool BPlusTree::rangeSearch(Key low, Key high,
                             std::vector<Entry> *out_entries) const {
   if (out_entries == nullptr) {
     return false;
@@ -121,7 +121,7 @@ bool BPlusTree::rangeSearch(uint32_t low, uint32_t high,
         continue;
       }
 
-      if (e.key > high) {
+      if (e.key >= high) {
         exceeded_upper_bound = true;
         break;
       }
@@ -138,7 +138,7 @@ bool BPlusTree::rangeSearch(uint32_t low, uint32_t high,
   return true;
 };
 
-bool BPlusTree::insert(uint32_t key, RID rid) {
+bool BPlusTree::insert(Key key, RID rid) {
   page_id_t current_id = m_root_page_id;
   while (true) {
     Page *page = m_bpm->fetchPage(current_id);
@@ -156,6 +156,7 @@ bool BPlusTree::insert(uint32_t key, RID rid) {
       }
       m_bpm->unpinPage(current_id, false);
       return split(current_id, entry, INVALID_PAGE_ID);
+
     } else if (h->page_type == NodeType::INTERNAL) {
       InternalNode internal(page->getData());
       page_id_t next_id = internal.findChild(key);
@@ -247,7 +248,7 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
     old_leaf.setNextLeafId(new_leaf_id);
 
     // Separator goes to parent.
-    uint32_t separator_key = entries_right[0].key;
+    Key separator_key = entries_right[0].key;
 
     Entry separator_entry{separator_key, RID{}};
 
@@ -275,7 +276,7 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
 
       std::vector<page_id_t> children{page_id, new_leaf_id};
 
-      std::vector<uint32_t> keys{separator_key};
+      std::vector<Key> keys{separator_key};
 
       root.setAllChildrenKeys(children, keys);
 
@@ -331,7 +332,7 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
     // ----------------------------------------------------------
     if (!node.isFull()) {
       std::vector<page_id_t> children;
-      std::vector<uint32_t> keys;
+      std::vector<Key> keys;
 
       node.getAllChildrenKeys(&children, &keys);
 
@@ -347,7 +348,7 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
       return true;
     }
     std::vector<page_id_t> children;
-    std::vector<uint32_t> keys;
+    std::vector<Key> keys;
 
     node.getAllChildrenKeys(&children, &keys);
 
@@ -370,16 +371,16 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
 
     size_t mid = keys.size() / 2;
 
-    uint32_t promoted_key = keys[mid];
+    Key promoted_key = keys[mid];
 
     // Left node
-    std::vector<uint32_t> left_keys(keys.begin(), keys.begin() + mid);
+    std::vector<Key> left_keys(keys.begin(), keys.begin() + mid);
 
     std::vector<page_id_t> left_children(children.begin(),
                                          children.begin() + mid + 1);
 
     // Right node
-    std::vector<uint32_t> right_keys(keys.begin() + mid + 1, keys.end());
+    std::vector<Key> right_keys(keys.begin() + mid + 1, keys.end());
 
     std::vector<page_id_t> right_children(children.begin() + mid + 1,
                                           children.end());
@@ -458,7 +459,7 @@ bool BPlusTree::split(page_id_t page_id, Entry &entry,
 
       std::vector<page_id_t> root_children{page_id, new_internal_id};
 
-      std::vector<uint32_t> root_keys{promoted_key};
+      std::vector<Key> root_keys{promoted_key};
 
       root.setAllChildrenKeys(root_children, root_keys);
 
@@ -514,5 +515,62 @@ void BPlusTree::setRootPageId(page_id_t root_page_id) {
   if (m_root_change_callback) {
     m_root_change_callback(root_page_id);
   }
+}
+
+SerializedKey serializeKey(const Key &key) {
+  SerializedKey result{};
+
+  result.type = static_cast<uint8_t>(key.type);
+
+  if (key.type == KeyType::INTEGER) {
+    result.length = sizeof(int32_t);
+
+    std::memcpy(result.data, &key.integer, sizeof(int32_t));
+  } else {
+
+    if (key.string.size() > 128) {
+      throw std::runtime_error("Index key too large");
+    }
+
+    result.length = static_cast<uint16_t>(key.string.size());
+
+    std::memcpy(result.data, key.string.data(), result.length);
+  }
+
+  return result;
+}
+Key deserializeKey(const SerializedKey &data) {
+
+  Key key;
+
+  key.type = static_cast<KeyType>(data.type);
+
+  if (key.type == KeyType::INTEGER) {
+
+    std::memcpy(&key.integer, data.data, sizeof(int32_t));
+
+  } else {
+
+    key.string.assign(data.data, data.length);
+  }
+
+  return key;
+}
+// for like %slim
+static std::string nextPrefix(const std::string &prefix) {
+  std::string result = prefix;
+
+  for (int i = static_cast<int>(result.size()) - 1; i >= 0; --i) {
+    unsigned char c = static_cast<unsigned char>(result[i]);
+
+    if (c != 0xFF) {
+      result[i] = static_cast<char>(c + 1);
+      result.resize(i + 1);
+      return result;
+    }
+  }
+
+  // No representable upper bound.
+  return {};
 }
 } // namespace WalouDB

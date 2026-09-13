@@ -11,6 +11,7 @@ struct Column {
 
 class Schema {
 public:
+  Schema() = default;
   explicit Schema(std::vector<Column> columns)
       : m_columns(std::move(columns)) {}
   size_t getColumnCount() const { return m_columns.size(); }
