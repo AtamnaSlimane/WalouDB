@@ -32,6 +32,7 @@ target_link_libraries(
     WalouDB
     PRIVATE
         spdlog::spdlog
+        faker-cxx
 )
 
 # ========================

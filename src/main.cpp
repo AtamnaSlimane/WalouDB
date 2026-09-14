@@ -1,3 +1,4 @@
+#include "faker-cxx/faker.h"
 #include "waloudb/common/Types.h"
 #include "waloudb/storage/BPlusTree.h"
 #include "waloudb/storage/BufferPoolManager.h"
@@ -946,8 +947,8 @@ void insertDummyRows(
           values.emplace_back(static_cast<int32_t>(18 + (id % 50)));
         }
       } else if (column_info.type == TypeId::VARCHAR) {
-        values.emplace_back(table_name + "_" + column_info.name + "_" +
-                            std::to_string(id));
+        values.emplace_back(faker::person::fullName());
+
       } else {
         values.clear();
         break;
