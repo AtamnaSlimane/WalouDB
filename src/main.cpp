@@ -1,4 +1,5 @@
 #include "faker-cxx/faker.h"
+#include "faker-cxx/person.h"
 #include "waloudb/common/Types.h"
 #include "waloudb/storage/BPlusTree.h"
 #include "waloudb/storage/BufferPoolManager.h"
@@ -947,7 +948,7 @@ void insertDummyRows(
           values.emplace_back(static_cast<int32_t>(18 + (id % 50)));
         }
       } else if (column_info.type == TypeId::VARCHAR) {
-        values.emplace_back(faker::person::fullName());
+        values.emplace_back(std::string(faker::person::firstName()));
 
       } else {
         values.clear();
@@ -1400,8 +1401,8 @@ void searchVarchar(
   if (choice == 1) {
     auto start = std::chrono::steady_clock::now();
 
-    RID rid{};
-    bool found = index.search(Key::Varchar(value), &rid);
+    std::vector<RID> rids;
+    bool found = index.searchAll(Key::Varchar(value), &rids);
 
     auto end = std::chrono::steady_clock::now();
 
@@ -1414,21 +1415,21 @@ void searchVarchar(
       std::cout << "\n[NOT FOUND]\n";
       return;
     }
+    for (const RID &rid : rids) {
+      Tuple tuple;
 
-    Tuple tuple;
+      if (!table.getTuple(rid, &tuple)) {
+        std::cout << "\n[ERROR] Index contains stale RID.\n";
+        return;
+      }
 
-    if (!table.getTuple(rid, &tuple)) {
-      std::cout << "\n[ERROR] Index contains stale RID.\n";
-      return;
+      std::cout << "\n[FOUND]\n";
+      std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
+
+      printBorder();
+      printTupleValues(tuple, schema);
+      printBorder();
     }
-
-    std::cout << "\n[FOUND]\n";
-    std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
-
-    printBorder();
-    printTupleValues(tuple, schema);
-    printBorder();
-
     return;
   }
 

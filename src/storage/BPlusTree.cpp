@@ -55,6 +55,24 @@ bool BPlusTree::search(Key key, RID *out_rid) const {
   }
 }
 
+bool BPlusTree::searchAll(Key key, std::vector<RID> *out_rids) const {
+  if (out_rids == nullptr) {
+    return false;
+  }
+  out_rids->clear();
+  std::vector<Entry> entries;
+  if (!rangeSearch(key, key, &entries)) {
+    return false;
+  }
+  out_rids->reserve(entries.size());
+  for (const Entry &entry : entries) {
+    if (key == entry.key) {
+      out_rids->push_back(entry.rid);
+    }
+  }
+  return true;
+};
+
 bool BPlusTree::rangeSearch(Key low, Key high,
                             std::vector<Entry> *out_entries) const {
   if (out_entries == nullptr) {
@@ -121,7 +139,7 @@ bool BPlusTree::rangeSearch(Key low, Key high,
         continue;
       }
 
-      if (e.key >= high) {
+      if (e.key > high) {
         exceeded_upper_bound = true;
         break;
       }

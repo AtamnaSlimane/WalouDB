@@ -560,6 +560,7 @@ public:
   BPlusTree(BufferPoolManager *bpm, page_id_t root_page_id);
 
   bool search(Key key, RID *out_rid) const;
+  bool searchAll(Key key, std::vector<RID> *out_rids) const;
   bool insert(Key key, RID rid);
   bool split(page_id_t page_id, Entry &entry, page_id_t right_child_id);
   bool rangeSearch(Key low, Key high, std::vector<Entry> *out_entries) const;
