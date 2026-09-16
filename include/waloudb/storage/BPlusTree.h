@@ -564,6 +564,7 @@ public:
   bool insert(Key key, RID rid);
   bool split(page_id_t page_id, Entry &entry, page_id_t right_child_id);
   bool rangeSearch(Key low, Key high, std::vector<Entry> *out_entries) const;
+  bool remove(Key key);
 
   page_id_t getRootId() { return m_root_page_id; }
   // bool getValue(uint32_t key, RID *rid);

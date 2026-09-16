@@ -3,6 +3,7 @@
 #include "waloudb/storage/BufferPoolManager.h"
 #include "waloudb/storage/Page.h"
 #include "waloudb/storage/SlottedPage.h"
+#include "waloudb/storage/TableHeap.h"
 #include <algorithm>
 #include <cstdint>
 #include <vector>
@@ -190,6 +191,25 @@ bool BPlusTree::insert(Key key, RID rid) {
     // self balancing if full
   }
 }
+// high lvl api for removing a tuple , no balancing or tree deletion yet
+bool BPlusTree::remove(Key key) {
+  RID rid;
+  if (!search(key, &rid)) {
+    return false;
+  }
+  Page *page = m_bpm->fetchPage(rid.page_id);
+  if (page == nullptr) {
+    return false;
+  }
+  SlottedPage sp(page->getData());
+  bool deleted = sp.deleteTuple(rid.slot_num);
+  m_bpm->unpinPage(rid.page_id, deleted);
+  if (deleted == false) {
+    return false;
+  }
+  return true;
+}
+
 bool BPlusTree::split(page_id_t page_id, Entry &entry,
                       page_id_t right_child_id) {
 
@@ -591,4 +611,5 @@ static std::string nextPrefix(const std::string &prefix) {
   // No representable upper bound.
   return {};
 }
+
 } // namespace WalouDB

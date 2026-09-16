@@ -20,6 +20,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <strings.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -857,7 +858,7 @@ bool deleteFromTable(Catalog &catalog, BufferPoolManager &bpm,
     return false;
   }
 
-  if (!table.deleteTuple(rid)) {
+  if (!primary_index->remove(Key::Integer(id))) {
     std::cout << "\n[FAILED] Table deletion failed.\n";
     return false;
   }
