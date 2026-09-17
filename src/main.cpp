@@ -31,7 +31,7 @@ using namespace WalouDB;
 // Configuration
 // ============================================================
 
-constexpr size_t BUFFER_POOL_SIZE = 4096 * 100;
+constexpr size_t BUFFER_POOL_SIZE = 4096 * 10;
 constexpr const char *DATABASE_FILE = "waloudb.db";
 
 // ============================================================
@@ -865,13 +865,6 @@ bool deleteFromTable(Catalog &catalog, BufferPoolManager &bpm,
 
   std::cout << "\n[SUCCESS] Tuple deleted from table.\n";
   std::cout << "RID = (" << rid.page_id << ", " << rid.slot_num << ")\n";
-
-  // No B+Tree::delete() exists in the current API, so rebuild it.
-  if (!rebuildPrimaryIndex(catalog, bpm, meta, table, schema, primary_column,
-                           primary_index)) {
-    std::cout << "[WARNING] The tuple was deleted, but the primary index "
-                 "could not be rebuilt.\n";
-  }
 
   return true;
 }

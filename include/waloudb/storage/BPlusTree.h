@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <iterator>
+#include <shared_mutex>
 #include <vector>
 namespace WalouDB {
 
@@ -209,6 +210,10 @@ public:
     return true;
   }
 
+  static constexpr size_t maxEntries() {
+    return (PAGE_SIZE - sizeof(LeafHeader)) / entrySize();
+  }
+
 private:
   struct LeafHeader : NodeHeader {
     page_id_t next_leaf_page_id;
@@ -263,10 +268,6 @@ private:
 
   static constexpr size_t entrySize() {
     return sizeof(SerializedKey) + sizeof(RID);
-  }
-
-  static constexpr size_t maxEntries() {
-    return (PAGE_SIZE - sizeof(LeafHeader)) / entrySize();
   }
 };
 // ============================================================
@@ -496,6 +497,11 @@ public:
     return true;
   }
 
+  static constexpr size_t maxKeys() {
+    return (PAGE_SIZE - sizeof(NodeHeader) - sizeof(page_id_t)) /
+           (sizeof(SerializedKey) + sizeof(page_id_t));
+  }
+
 private:
   char *m_data;
 
@@ -548,11 +554,6 @@ private:
 
     return left;
   }
-
-  static constexpr size_t maxKeys() {
-    return (PAGE_SIZE - sizeof(NodeHeader) - sizeof(page_id_t)) /
-           (sizeof(SerializedKey) + sizeof(page_id_t));
-  }
 };
 class BPlusTree {
 public:
@@ -579,6 +580,17 @@ private:
   RootChangeCallback m_root_change_callback;
 
   void setRootPageId(page_id_t root_page_id);
+
+  page_id_t findLeaf(Key key) const;
+  bool insertIntoLeaf(page_id_t leaf_id, const Entry &entry);
+  bool removeFromLeaf(page_id_t leaf_id, Key key, RID *out_rid);
+  bool handleLeafUnderflow(page_id_t leaf_id);
+  bool handleInternalUnderflow(page_id_t node_id);
+  bool adjustRoot();
+
+  void freePage(page_id_t page_id);
+
+  mutable std::shared_mutex m_latch;
 };
 
 } // namespace WalouDB
