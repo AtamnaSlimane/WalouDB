@@ -1379,20 +1379,15 @@ void searchVarchar(
 
   BPlusTree &index = *index_it->second;
 
-  std::cout << "\nSearch type:\n";
-  std::cout << "  1. Exact (=)\n";
-  std::cout << "  2. Prefix LIKE (text%)\n";
+  std::string value =
+      readString("Value (use % for prefix search, e.g. Slim%): ");
 
-  int choice = readInt("Choice: ");
+  bool is_like = value.find('%') != std::string::npos;
 
-  if (choice != 1 && choice != 2) {
-    std::cout << "[FAILED] Invalid choice.\n";
-    return;
-  }
-
-  std::string value = readString("Value: ");
-
-  if (choice == 1) {
+  // ------------------------------------------------------------
+  // EXACT SEARCH (no '%' in the value)
+  // ------------------------------------------------------------
+  if (!is_like) {
     auto start = std::chrono::steady_clock::now();
 
     std::vector<RID> rids;
@@ -1427,7 +1422,10 @@ void searchVarchar(
     return;
   }
 
-  if (value.empty() || value.back() != '%') {
+  // ------------------------------------------------------------
+  // PREFIX LIKE SEARCH ('%' present — must be trailing, e.g. "Slim%")
+  // ------------------------------------------------------------
+  if (value.back() != '%') {
     std::cout << "\n[FAILED] Prefix LIKE must end with '%'.\n";
     std::cout << "Example: Slim%\n";
     return;
@@ -1514,7 +1512,6 @@ void searchVarchar(
     std::cout << "Displayed: " << displayed << " row(s).\n";
   }
 }
-
 // ============================================================
 // Secondary-index range search
 // ============================================================
