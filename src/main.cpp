@@ -5,6 +5,7 @@
 #include "waloudb/storage/BufferPoolManager.h"
 #include "waloudb/storage/Catalog.h"
 #include "waloudb/storage/Database.h"
+#include "waloudb/storage/DatabaseManager.h"
 #include "waloudb/storage/DiskManager.h"
 #include "waloudb/storage/Page.h"
 #include "waloudb/storage/Schema.h"
@@ -1692,6 +1693,12 @@ void printMenu() {
   printLine('=');
   std::cout << "                    WALOUDB\n";
   printLine('=');
+  std::cout << "\nDATABASE\n";
+  std::cout << " 30. Create database\n";
+  std::cout << " 31. Switch database\n";
+  std::cout << " 32. List databases\n";
+  std::cout << " 33. Close database\n";
+  std::cout << " 34. Remove database\n";
 
   std::cout << "\nBUFFER POOL\n";
   std::cout << " 10. Show buffer pool\n";
@@ -1728,48 +1735,99 @@ void printMenu() {
 // ============================================================
 // Main
 // ============================================================
+constexpr const char *DATABASE_DIRECTORY = "databases";
 
-int main() {
-  std::cout << R"(
-============================================================
-                     WALOUDB
-              C++ Database Playground
-============================================================
-)";
+// ============================================================
+// Clear current table state
+// ============================================================
+
+void clearCurrentTable(
+    TableMetadata *&current_meta, std::unique_ptr<TableHeap> &current_table,
+    Schema &current_schema, std::string &current_primary_column,
+    std::unique_ptr<BPlusTree> &current_primary_index,
+    std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+        &current_secondary_indexes) {
+
+  current_primary_index.reset();
+  current_secondary_indexes.clear();
+  current_table.reset();
+
+  current_meta = nullptr;
+  current_schema = Schema();
+  current_primary_column.clear();
+}
+
+// ============================================================
+// Open a table
+// ============================================================
+bool openCurrentTable(
+    DatabaseManager &database_manager, const std::string &table_name,
+    TableMetadata *&current_meta, std::unique_ptr<TableHeap> &current_table,
+    Schema &current_schema, std::string &current_primary_column,
+    std::unique_ptr<BPlusTree> &current_primary_index,
+    std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+        &current_secondary_indexes) {
+
+  auto *bpm = database_manager.getBufferPoolManager();
+  auto *catalog = database_manager.getCatalog();
+
+  if (bpm == nullptr || catalog == nullptr) {
+    std::cerr << "[ERROR] No database is currently open.\n";
+    return false;
+  }
+
+  return openTable(*catalog, *bpm, table_name, current_meta, current_table,
+                   current_schema, current_primary_column,
+                   current_primary_index, current_secondary_indexes);
+}
+
+// ============================================================
+// Open database and default/current table
+// ============================================================
+
+bool switchDatabase(DatabaseManager &database_manager,
+                    const std::string &database_name,
+                    TableMetadata *&current_meta,
+                    std::unique_ptr<TableHeap> &current_table,
+                    Schema &current_schema, std::string &current_primary_column,
+                    std::unique_ptr<BPlusTree> &current_primary_index,
+                    std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+                        &current_secondary_indexes) {
+
+  if (!database_manager.databaseExists(database_name)) {
+    std::cout << "[FAILED] Database '" << database_name
+              << "' does not exist.\n";
+    return false;
+  }
+
+  // The current table uses objects owned by the current Database.
+  // Destroy it before switching databases.
+  clearCurrentTable(current_meta, current_table, current_schema,
+                    current_primary_column, current_primary_index,
+                    current_secondary_indexes);
+
+  if (!database_manager.openDatabase(database_name)) {
+    std::cout << "[FAILED] Could not open database '" << database_name
+              << "'.\n";
+    return false;
+  }
+
+  auto *catalog = database_manager.getCatalog();
+
+  if (catalog == nullptr) {
+    std::cout << "[FAILED] Database has no catalog.\n";
+    database_manager.closeDatabase();
+    return false;
+  }
 
   // ----------------------------------------------------------
-  // Core database components
-  // ----------------------------------------------------------
-  Database db(DATABASE_FILE);
-
-  auto *bpm = db.getBufferPoolManager();
-  auto *catalog = db.getCatalog();
-  // ----------------------------------------------------------
-  // Current table state
-  // ----------------------------------------------------------
-
-  TableMetadata *current_meta = nullptr;
-
-  std::unique_ptr<TableHeap> current_table;
-  Schema current_schema;
-
-  std::string current_primary_column;
-
-  std::unique_ptr<BPlusTree> current_primary_index;
-
-  std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
-      current_secondary_indexes;
-
-  // ----------------------------------------------------------
-  // Default table.
-  //
-  // If this database is new, create a simple users table.
-  // Existing databases keep their persisted schema.
+  // Make sure the database has a default users table.
   // ----------------------------------------------------------
 
   TableMetadata *users_meta = catalog->getTable("users");
 
   if (users_meta == nullptr) {
+
     std::cout << "\nCreating default table 'users'...\n";
 
     Schema default_schema({
@@ -1780,44 +1838,142 @@ int main() {
     users_meta = catalog->createTable("users", default_schema);
 
     if (users_meta == nullptr) {
-      std::cerr << "\nFatal error: could not create users table.\n";
-      return 1;
+      std::cerr << "[ERROR] Could not create users table.\n";
+
+      database_manager.closeDatabase();
+      return false;
     }
 
     std::cout << "[SUCCESS] users table created.\n";
   }
 
   // ----------------------------------------------------------
-  // Open users.
+  // Open users
   // ----------------------------------------------------------
 
-  if (!openTable(*catalog, *bpm, "users", current_meta, current_table,
-                 current_schema, current_primary_column, current_primary_index,
-                 current_secondary_indexes)) {
-    std::cerr << "\nFatal error: could not open users table.\n";
+  if (!openCurrentTable(database_manager, "users", current_meta, current_table,
+                        current_schema, current_primary_column,
+                        current_primary_index, current_secondary_indexes)) {
+
+    std::cerr << "[ERROR] Could not open users table.\n";
+
+    database_manager.closeDatabase();
+    return false;
+  }
+
+  return true;
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+int main() {
+
+  std::cout << R"(
+============================================================
+                     WALOUDB
+              C++ Database Playground
+============================================================
+)";
+
+  // ==========================================================
+  // Database manager
+  // ==========================================================
+
+  DatabaseManager database_manager(DATABASE_DIRECTORY);
+
+  // ==========================================================
+  // Current table state
+  // ==========================================================
+
+  TableMetadata *current_meta = nullptr;
+
+  std::unique_ptr<TableHeap> current_table;
+
+  Schema current_schema;
+
+  std::string current_primary_column;
+
+  std::unique_ptr<BPlusTree> current_primary_index;
+
+  std::unordered_map<std::string, std::unique_ptr<BPlusTree>>
+      current_secondary_indexes;
+
+  // ==========================================================
+  // Start with a default database
+  // ==========================================================
+
+  constexpr const char *DEFAULT_DATABASE = "default";
+
+  if (!database_manager.databaseExists(DEFAULT_DATABASE)) {
+
+    std::cout << "\nCreating default database '" << DEFAULT_DATABASE
+              << "'...\n";
+
+    if (!database_manager.createDatabase(DEFAULT_DATABASE)) {
+
+      std::cerr << "[FATAL] Could not create default database.\n";
+
+      return 1;
+    }
+
+    std::cout << "[SUCCESS] Database created.\n";
+  }
+
+  if (!switchDatabase(database_manager, DEFAULT_DATABASE, current_meta,
+                      current_table, current_schema, current_primary_column,
+                      current_primary_index, current_secondary_indexes)) {
+
+    std::cerr << "[FATAL] Could not open default database.\n";
+
     return 1;
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // Main loop
-  // ----------------------------------------------------------
+  // ==========================================================
 
   bool running = true;
 
   while (running) {
+
     printMenu();
 
     std::cout << '\n';
     printLine('-');
 
-    if (current_meta != nullptr) {
-      std::cout << "Current table : " << current_meta->name << '\n';
-      std::cout << "Table ID      : " << current_meta->table_id << '\n';
-      std::cout << "First page    : " << current_meta->first_page_id << '\n';
-      std::cout << "Primary key   : " << current_primary_column << '\n';
-      std::cout << "Primary index : " << current_meta->name << "_pk\n";
+    // --------------------------------------------------------
+    // Current database
+    // --------------------------------------------------------
+
+    const std::string &current_db = database_manager.getCurrentDatabaseName();
+
+    if (!current_db.empty()) {
+      std::cout << "Current database: " << current_db << '\n';
     } else {
-      std::cout << "Current table : (none)\n";
+      std::cout << "Current database: (none)\n";
+    }
+
+    // --------------------------------------------------------
+    // Current table
+    // --------------------------------------------------------
+
+    if (current_meta != nullptr) {
+
+      std::cout << "Current table   : " << current_meta->name << '\n';
+
+      std::cout << "Table ID        : " << current_meta->table_id << '\n';
+
+      std::cout << "First page      : " << current_meta->first_page_id << '\n';
+
+      std::cout << "Primary key     : " << current_primary_column << '\n';
+
+      std::cout << "Primary index   : " << current_meta->name << "_pk\n";
+
+    } else {
+
+      std::cout << "Current table   : (none)\n";
     }
 
     printLine('-');
@@ -1825,11 +1981,13 @@ int main() {
     int choice = readInt("WalouDB >> ");
 
     switch (choice) {
+
       // ========================================================
       // EXIT
       // ========================================================
 
     case 0:
+
       running = false;
       break;
 
@@ -1837,66 +1995,135 @@ int main() {
       // BUFFER POOL
       // ========================================================
 
-    case 10:
-      printBufferPool(*bpm);
-      break;
+    case 10: {
 
-    case 11:
-      printLRU(*bpm);
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (bpm) {
+        printBufferPool(*bpm);
+      } else {
+        std::cout << "[ERROR] No database is open.\n";
+      }
+
       break;
+    }
+
+    case 11: {
+
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (bpm) {
+        printLRU(*bpm);
+      } else {
+        std::cout << "[ERROR] No database is open.\n";
+      }
+
+      break;
+    }
 
       // ========================================================
       // DISK
       // ========================================================
 
-    case 13:
-      flushAllPages(*bpm);
+    case 13: {
+
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (bpm) {
+        flushAllPages(*bpm);
+      } else {
+        std::cout << "[ERROR] No database is open.\n";
+      }
+
       break;
+    }
 
       // ========================================================
       // TABLE
       // ========================================================
 
     case 14:
+
       if (current_table && current_primary_index) {
+
         insertIntoTable(*current_table, current_schema, *current_primary_index,
                         current_primary_column);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
     case 15:
+
       if (current_table) {
+
         getFromTable(*current_table, current_schema);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
     case 16:
+
       if (current_table && current_primary_index) {
+
         updateInTable(*current_table, current_schema, *current_primary_index,
                       current_primary_column);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
-    case 17:
-      if (current_table && current_primary_index) {
+    case 17: {
+
+      auto *catalog = database_manager.getCatalog();
+
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (catalog && bpm && current_meta && current_table &&
+          current_primary_index) {
+
         deleteFromTable(*catalog, *bpm, current_meta, *current_table,
                         current_schema, current_primary_column,
                         current_primary_index);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
+    }
 
     case 18:
+
       if (current_table && current_primary_index) {
+
         insertDummyRows(*current_table, current_schema, *current_primary_index,
                         current_secondary_indexes, current_meta->name,
                         current_primary_column);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
     case 19:
+
       if (current_table) {
+
         visualizeTable(*current_table, current_schema);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
       // ========================================================
@@ -1904,6 +2131,16 @@ int main() {
       // ========================================================
 
     case 20: {
+
+      auto *catalog = database_manager.getCatalog();
+
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (!catalog || !bpm) {
+        std::cout << "[ERROR] No database is open.\n";
+        break;
+      }
+
       std::string table_name = readString("Enter table name: ");
 
       if (table_name.empty()) {
@@ -1911,11 +2148,17 @@ int main() {
         break;
       }
 
+      // ------------------------------------------------------
+      // Existing table -> switch
+      // ------------------------------------------------------
+
       if (catalog->getTable(table_name) != nullptr) {
-        // Existing table: switch to it.
-        if (openTable(*catalog, *bpm, table_name, current_meta, current_table,
-                      current_schema, current_primary_column,
-                      current_primary_index, current_secondary_indexes)) {
+
+        if (openCurrentTable(database_manager, table_name, current_meta,
+                             current_table, current_schema,
+                             current_primary_column, current_primary_index,
+                             current_secondary_indexes)) {
+
           std::cout << "\n[SUCCESS] Switched to table '" << table_name
                     << "'.\n";
         }
@@ -1923,13 +2166,18 @@ int main() {
         break;
       }
 
-      // New table.
+      // ------------------------------------------------------
+      // Create new table
+      // ------------------------------------------------------
+
       TableCreationInfo creation = createTableSchemaInteractive();
 
       TableMetadata *meta = catalog->createTable(table_name, creation.schema);
 
       if (meta == nullptr) {
+
         std::cout << "[FAILED] Could not create table.\n";
+
         break;
       }
 
@@ -1941,7 +2189,9 @@ int main() {
 
       if (!buildPrimaryIndex(*table, creation.schema, *primary_index,
                              creation.primary_column)) {
+
         std::cout << "[FAILED] Could not build primary index.\n";
+
         break;
       }
 
@@ -1952,27 +2202,38 @@ int main() {
                                primary_index->getRootId());
 
       if (primary_meta == nullptr) {
+
         std::cout << "[FAILED] Could not create primary index metadata.\n";
+
         break;
       }
 
       primary_index->setRootChangeCallback(
-          [&catalog, index_name](page_id_t new_root_id) {
+          [catalog, index_name](page_id_t new_root_id) {
             if (!catalog->updateIndexRoot(index_name, new_root_id)) {
+
               std::cerr << "[ERROR] Failed to persist root for index '"
                         << index_name << "'.\n";
             }
           });
 
+      // ------------------------------------------------------
+      // Make current
+      // ------------------------------------------------------
+
       current_meta = meta;
       current_schema = creation.schema;
       current_primary_column = creation.primary_column;
+
       current_table = std::move(table);
+
       current_primary_index = std::move(primary_index);
+
       current_secondary_indexes.clear();
 
       std::cout << "\n[SUCCESS] Created and opened table '" << table_name
                 << "'.\n";
+
       break;
     }
 
@@ -1980,77 +2241,291 @@ int main() {
       // CATALOG
       // ========================================================
 
-    case 21:
-      visualizeCatalog(*catalog);
+    case 21: {
+
+      auto *catalog = database_manager.getCatalog();
+
+      if (catalog) {
+        visualizeCatalog(*catalog);
+      } else {
+        std::cout << "[ERROR] No database is open.\n";
+      }
+
       break;
+    }
 
       // ========================================================
       // PRIMARY INDEX
       // ========================================================
 
     case 22:
+
       if (current_table && current_primary_index) {
+
         searchByPrimaryKey(*current_table, current_schema,
                            *current_primary_index);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
-    case 23:
-      if (current_table && current_primary_index) {
+    case 23: {
+
+      auto *catalog = database_manager.getCatalog();
+
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (catalog && bpm && current_meta && current_table &&
+          current_primary_index) {
+
         rebuildPrimaryIndex(*catalog, *bpm, current_meta, *current_table,
                             current_schema, current_primary_column,
                             current_primary_index);
-      }
-      break;
 
-    case 24:
-      showAllTablesDetailed(*catalog, *bpm);
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
+      }
+
       break;
+    }
+
+    case 24: {
+
+      auto *catalog = database_manager.getCatalog();
+
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (catalog && bpm) {
+
+        showAllTablesDetailed(*catalog, *bpm);
+
+      } else {
+        std::cout << "[ERROR] No database is open.\n";
+      }
+
+      break;
+    }
 
     case 25:
+
       if (current_table && current_primary_index) {
+
         rangeSearchByPrimaryKey(*current_table, current_schema,
                                 *current_primary_index);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
-    case 26:
-      if (current_table) {
+    case 26: {
+
+      auto *catalog = database_manager.getCatalog();
+
+      auto *bpm = database_manager.getBufferPoolManager();
+
+      if (catalog && bpm && current_meta && current_table) {
+
         createSecondaryIndex(*catalog, *bpm, current_meta, *current_table,
                              current_schema, current_secondary_indexes);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
+    }
 
     case 27:
+
       if (current_table) {
+
         rangeSearchSecondary(*current_table, current_schema,
                              current_secondary_indexes);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
     case 28:
+
       if (current_table) {
+
         searchVarchar(*current_table, current_schema,
                       current_secondary_indexes);
+
+      } else {
+        std::cout << "[ERROR] No table is open.\n";
       }
+
       break;
 
+      // ========================================================
+      // DATABASE MANAGEMENT
+      // ========================================================
+
+    case 30: {
+
+      std::string name = readString("Database name: ");
+
+      if (name.empty()) {
+        std::cout << "[FAILED] Database name cannot be empty.\n";
+        break;
+      }
+
+      if (database_manager.createDatabase(name)) {
+
+        std::cout << "[SUCCESS] Database '" << name << "' created.\n";
+
+      } else {
+
+        std::cout << "[FAILED] Database already exists "
+                     "or could not be created.\n";
+      }
+
+      break;
+    }
+
+      // ========================================================
+      // SWITCH DATABASE
+      // ========================================================
+
+    case 31: {
+
+      std::string name = readString("Database name: ");
+
+      if (name.empty()) {
+        std::cout << "[FAILED] Database name cannot be empty.\n";
+        break;
+      }
+
+      if (name == database_manager.getCurrentDatabaseName()) {
+
+        std::cout << "[INFO] Already using database '" << name << "'.\n";
+
+        break;
+      }
+
+      if (switchDatabase(database_manager, name, current_meta, current_table,
+                         current_schema, current_primary_column,
+                         current_primary_index, current_secondary_indexes)) {
+
+        std::cout << "[SUCCESS] Switched to database '" << name << "'.\n";
+      }
+
+      break;
+    }
+
+      // ========================================================
+      // LIST DATABASES
+      // ========================================================
+
+    case 32: {
+
+      auto databases = database_manager.listDatabases();
+
+      std::cout << "\nDatabases:\n";
+
+      if (databases.empty()) {
+
+        std::cout << "  (none)\n";
+
+        break;
+      }
+
+      for (const auto &name : databases) {
+
+        std::cout << "  " << name;
+
+        if (name == database_manager.getCurrentDatabaseName()) {
+
+          std::cout << "  <current>";
+        }
+
+        std::cout << '\n';
+      }
+
+      break;
+    }
+
+      // ========================================================
+      // CLOSE DATABASE
+      // ========================================================
+
+    case 33: {
+
+      clearCurrentTable(current_meta, current_table, current_schema,
+                        current_primary_column, current_primary_index,
+                        current_secondary_indexes);
+
+      database_manager.closeDatabase();
+
+      std::cout << "[SUCCESS] Database closed.\n";
+
+      break;
+    }
+
+      // ========================================================
+      // REMOVE DATABASE
+      // ========================================================
+
+    case 34: {
+
+      std::string name = readString("Database name: ");
+
+      if (name == database_manager.getCurrentDatabaseName()) {
+
+        std::cout << "[FAILED] Cannot remove the "
+                     "currently open database.\n";
+
+        break;
+      }
+
+      if (database_manager.removeDatabase(name)) {
+
+        std::cout << "[SUCCESS] Database '" << name << "' removed.\n";
+
+      } else {
+
+        std::cout << "[FAILED] Could not remove database.\n";
+      }
+
+      break;
+    }
+
     default:
+
       std::cout << "\nUnknown command.\n";
+
       break;
     }
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // Shutdown
+  // ==========================================================
+  std::cout << '\n';
+
+  printLine('=');
+
+  std::cout << "Shutting down WalouDB...\n";
+
+  printLine('=');
+
+  // ----------------------------------------------------------
+  // Destroy table objects before DatabaseManager.
   // ----------------------------------------------------------
 
-  std::cout << '\n';
-  printLine('=');
-  std::cout << "Shutting down WalouDB...\n";
-  printLine('=');
+  clearCurrentTable(current_meta, current_table, current_schema,
+                    current_primary_column, current_primary_index,
+                    current_secondary_indexes);
 
-  flushAllPages(*bpm);
+  database_manager.closeDatabase();
 
   std::cout << "\nGoodbye.\n";
 
