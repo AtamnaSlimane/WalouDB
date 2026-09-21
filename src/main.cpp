@@ -4,6 +4,7 @@
 #include "waloudb/storage/BPlusTree.h"
 #include "waloudb/storage/BufferPoolManager.h"
 #include "waloudb/storage/Catalog.h"
+#include "waloudb/storage/Database.h"
 #include "waloudb/storage/DiskManager.h"
 #include "waloudb/storage/Page.h"
 #include "waloudb/storage/Schema.h"
@@ -31,7 +32,6 @@ using namespace WalouDB;
 // Configuration
 // ============================================================
 
-constexpr size_t BUFFER_POOL_SIZE = 4096 * 10;
 constexpr const char *DATABASE_FILE = "waloudb.db";
 
 // ============================================================
@@ -1740,11 +1740,10 @@ int main() {
   // ----------------------------------------------------------
   // Core database components
   // ----------------------------------------------------------
+  Database db(DATABASE_FILE);
 
-  DiskManager disk_manager(DATABASE_FILE);
-  BufferPoolManager bpm(BUFFER_POOL_SIZE, &disk_manager);
-  Catalog catalog(&bpm);
-
+  auto *bpm = db.getBufferPoolManager();
+  auto *catalog = db.getCatalog();
   // ----------------------------------------------------------
   // Current table state
   // ----------------------------------------------------------
@@ -1768,7 +1767,7 @@ int main() {
   // Existing databases keep their persisted schema.
   // ----------------------------------------------------------
 
-  TableMetadata *users_meta = catalog.getTable("users");
+  TableMetadata *users_meta = catalog->getTable("users");
 
   if (users_meta == nullptr) {
     std::cout << "\nCreating default table 'users'...\n";
@@ -1778,7 +1777,7 @@ int main() {
         {"name", TypeId::VARCHAR},
     });
 
-    users_meta = catalog.createTable("users", default_schema);
+    users_meta = catalog->createTable("users", default_schema);
 
     if (users_meta == nullptr) {
       std::cerr << "\nFatal error: could not create users table.\n";
@@ -1792,7 +1791,7 @@ int main() {
   // Open users.
   // ----------------------------------------------------------
 
-  if (!openTable(catalog, bpm, "users", current_meta, current_table,
+  if (!openTable(*catalog, *bpm, "users", current_meta, current_table,
                  current_schema, current_primary_column, current_primary_index,
                  current_secondary_indexes)) {
     std::cerr << "\nFatal error: could not open users table.\n";
@@ -1839,11 +1838,11 @@ int main() {
       // ========================================================
 
     case 10:
-      printBufferPool(bpm);
+      printBufferPool(*bpm);
       break;
 
     case 11:
-      printLRU(bpm);
+      printLRU(*bpm);
       break;
 
       // ========================================================
@@ -1851,7 +1850,7 @@ int main() {
       // ========================================================
 
     case 13:
-      flushAllPages(bpm);
+      flushAllPages(*bpm);
       break;
 
       // ========================================================
@@ -1880,7 +1879,7 @@ int main() {
 
     case 17:
       if (current_table && current_primary_index) {
-        deleteFromTable(catalog, bpm, current_meta, *current_table,
+        deleteFromTable(*catalog, *bpm, current_meta, *current_table,
                         current_schema, current_primary_column,
                         current_primary_index);
       }
@@ -1912,9 +1911,9 @@ int main() {
         break;
       }
 
-      if (catalog.getTable(table_name) != nullptr) {
+      if (catalog->getTable(table_name) != nullptr) {
         // Existing table: switch to it.
-        if (openTable(catalog, bpm, table_name, current_meta, current_table,
+        if (openTable(*catalog, *bpm, table_name, current_meta, current_table,
                       current_schema, current_primary_column,
                       current_primary_index, current_secondary_indexes)) {
           std::cout << "\n[SUCCESS] Switched to table '" << table_name
@@ -1927,16 +1926,16 @@ int main() {
       // New table.
       TableCreationInfo creation = createTableSchemaInteractive();
 
-      TableMetadata *meta = catalog.createTable(table_name, creation.schema);
+      TableMetadata *meta = catalog->createTable(table_name, creation.schema);
 
       if (meta == nullptr) {
         std::cout << "[FAILED] Could not create table.\n";
         break;
       }
 
-      auto table = std::make_unique<TableHeap>(&bpm, meta->first_page_id);
+      auto table = std::make_unique<TableHeap>(bpm, meta->first_page_id);
 
-      auto primary_index = std::make_unique<BPlusTree>(&bpm);
+      auto primary_index = std::make_unique<BPlusTree>(bpm);
 
       std::cout << "\nBuilding primary index...\n";
 
@@ -1949,8 +1948,8 @@ int main() {
       const std::string index_name = table_name + "_pk";
 
       IndexMetadata *primary_meta =
-          catalog.createIndex(index_name, table_name, creation.primary_column,
-                              primary_index->getRootId());
+          catalog->createIndex(index_name, table_name, creation.primary_column,
+                               primary_index->getRootId());
 
       if (primary_meta == nullptr) {
         std::cout << "[FAILED] Could not create primary index metadata.\n";
@@ -1959,7 +1958,7 @@ int main() {
 
       primary_index->setRootChangeCallback(
           [&catalog, index_name](page_id_t new_root_id) {
-            if (!catalog.updateIndexRoot(index_name, new_root_id)) {
+            if (!catalog->updateIndexRoot(index_name, new_root_id)) {
               std::cerr << "[ERROR] Failed to persist root for index '"
                         << index_name << "'.\n";
             }
@@ -1982,7 +1981,7 @@ int main() {
       // ========================================================
 
     case 21:
-      visualizeCatalog(catalog);
+      visualizeCatalog(*catalog);
       break;
 
       // ========================================================
@@ -1998,14 +1997,14 @@ int main() {
 
     case 23:
       if (current_table && current_primary_index) {
-        rebuildPrimaryIndex(catalog, bpm, current_meta, *current_table,
+        rebuildPrimaryIndex(*catalog, *bpm, current_meta, *current_table,
                             current_schema, current_primary_column,
                             current_primary_index);
       }
       break;
 
     case 24:
-      showAllTablesDetailed(catalog, bpm);
+      showAllTablesDetailed(*catalog, *bpm);
       break;
 
     case 25:
@@ -2017,7 +2016,7 @@ int main() {
 
     case 26:
       if (current_table) {
-        createSecondaryIndex(catalog, bpm, current_meta, *current_table,
+        createSecondaryIndex(*catalog, *bpm, current_meta, *current_table,
                              current_schema, current_secondary_indexes);
       }
       break;
@@ -2051,7 +2050,7 @@ int main() {
   std::cout << "Shutting down WalouDB...\n";
   printLine('=');
 
-  flushAllPages(bpm);
+  flushAllPages(*bpm);
 
   std::cout << "\nGoodbye.\n";
 

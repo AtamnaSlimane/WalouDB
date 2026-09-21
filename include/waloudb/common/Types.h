@@ -10,4 +10,5 @@ static constexpr page_id_t INVALID_PAGE_ID = -1;
 static constexpr page_id_t CATALOG_PAGE_ID = 0;
 static constexpr page_id_t INDEX_CATALOG_PAGE_ID = 1;
 constexpr size_t MAX_INDEX_KEY_SIZE = 128;
+constexpr size_t BUFFER_POOL_SIZE = 4096 * 10;
 } // namespace WalouDB
