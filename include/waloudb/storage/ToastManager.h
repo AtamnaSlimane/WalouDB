@@ -11,7 +11,7 @@ struct ToastPointer {
 };
 class ToastManager {
 public:
-  ToastManager(std::string toast_file_path, size_t pool_size);
+  ToastManager(const std::string &toast_file_path, size_t pool_size);
 
   bool insertToast(const char *data, uint32_t length, ToastPointer *out_ptr);
   bool readToast(const ToastPointer &ptr, std::vector<char> *out_data) const;
