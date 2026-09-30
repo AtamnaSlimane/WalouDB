@@ -7,7 +7,10 @@
 namespace WalouDB {
 
 struct ToastPointer {
-  page_id_t page_id{INVALID_PAGE_ID};
+  page_id_t first_page_id{INVALID_PAGE_ID};
+  uint32_t total_length{0}; // what to read "post compression if true"
+  uint32_t raw_length{0};   // pre compression
+  bool isCompressed{false};
 };
 class ToastManager {
 public:

@@ -69,7 +69,7 @@ bool ToastManager::insertToast(const char *data, uint32_t length,
     remaining -= amount;
   }
 
-  out_ptr->page_id = first_page_id;
+  out_ptr->first_page_id = first_page_id;
 
   return true;
 };
