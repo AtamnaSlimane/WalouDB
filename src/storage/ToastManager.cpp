@@ -15,18 +15,19 @@ bool ToastManager::insertToast(const char *data, uint32_t length,
   if (data == nullptr || length == 0 || out_ptr == nullptr) {
     return false;
   }
-  page_id_t first_page_id;
-  page_id_t previous_page_id;
 
-  uint32_t remaining = length;
+  page_id_t first_page_id = INVALID_PAGE_ID;
+  page_id_t previous_page_id = INVALID_PAGE_ID;
   uint32_t offset = 0;
 
-  while (remaining > 0) {
+  while (offset < length) {
     page_id_t page_id;
-
     Page *page = m_bpm->newPage(&page_id);
 
     if (page == nullptr) {
+      if (first_page_id != INVALID_PAGE_ID) {
+        // freeToast(ToastPointer{first_page_id, offset, 0, false});
+      }
       return false;
     }
 
@@ -34,43 +35,41 @@ bool ToastManager::insertToast(const char *data, uint32_t length,
     overflow.Init(page_id);
 
     uint16_t amount = static_cast<uint16_t>(
-        std::min<uint32_t>(remaining, OverflowPage::capacity()));
+        std::min<uint32_t>(length - offset, OverflowPage::capacity()));
 
     std::memcpy(overflow.payload(), data + offset, amount);
-
     overflow.setDataLength(amount);
-
-    page->setDirty(true);
 
     if (first_page_id == INVALID_PAGE_ID) {
       first_page_id = page_id;
     }
-
+    // linking pages together
     if (previous_page_id != INVALID_PAGE_ID) {
       Page *previous_page = m_bpm->fetchPage(previous_page_id);
-
       if (previous_page == nullptr) {
+        // the whole toast is flushed "freed"
         m_bpm->unpinPage(page_id, true);
+        m_bpm->deletePage(page_id);
+        if (first_page_id != page_id) {
+          // freeToast(ToastPointer{first_page_id, offset, 0, false});
+        }
         return false;
       }
-
       OverflowPage previous_overflow(previous_page->getData());
-
       previous_overflow.setNextPageId(page_id);
-
       m_bpm->unpinPage(previous_page_id, true);
     }
 
-    previous_page_id = page_id;
-
     m_bpm->unpinPage(page_id, true);
 
+    previous_page_id = page_id;
     offset += amount;
-    remaining -= amount;
   }
 
   out_ptr->first_page_id = first_page_id;
-
+  out_ptr->total_length = length;
+  out_ptr->raw_length = length;
+  out_ptr->is_compressed = false;
   return true;
-};
+}
 } // namespace WalouDB
